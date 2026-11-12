@@ -1,0 +1,15 @@
+{
+  "domain": "ha_manager",
+  "name": "HA Manager",
+  "after_dependencies": ["automation", "script", "scene", "group", "lovelace"],
+  "codeowners": ["@thedanieljwolfe-beep"],
+  "config_flow": true,
+  "dependencies": ["http", "frontend", "panel_custom", "websocket_api"],
+  "documentation": "https://github.com/thedanieljwolfe-beep/ha-manager",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/thedanieljwolfe-beep/ha-manager/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
