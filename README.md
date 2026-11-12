@@ -5,9 +5,9 @@ A Home Assistant custom integration that gives your smart home an MOT.
 It adds an **HA Manager** page to the sidebar that tells you, in plain English,
 what is broken, what is left over, and what to fix first.
 
-## What it does today (Phase 1, read-only)
+## What it does
 
-Phase 1 only *looks*. It never renames, moves or deletes anything.
+### Looking (never changes anything)
 
 - **Health score.** One number out of 100, with every problem sorted into
   Critical, Warning or Tidy-up.
@@ -21,10 +21,25 @@ Phase 1 only *looks*. It never renames, moves or deletes anything.
   automations and scripts that have not run in 90 days.
 - **Blast radius.** Pick any entity, device or room and see everything that
   uses it *before* you rename or delete it.
+- **Backup check.** Warns when the last automatic backup is over 7 days old.
 - **Works with your other tools.** Anything in Home Assistant's own Repairs
   list is pulled in, including warnings raised by
   [Spook](https://spook.boo). If [Watchman](https://github.com/dummylabs/thewatchman)
   is installed its counts are shown too.
+
+### Changing (always logged, always undoable)
+
+- **Rooms.** Drag devices between rooms, or tick several and move them
+  together. Put rooms on floors.
+- **Names.** Finds duplicate names, factory names, and names that mention the
+  wrong room, and suggests a fix you can apply in one click. Only the friendly
+  name changes. Entity IDs are never touched, so nothing that refers to them
+  breaks.
+- **Captain's Log.** Every move and rename is recorded with the old and new
+  value, and has an Undo button. Undo leaves alone anything that has been
+  changed again since.
+
+HA Manager never deletes anything.
 
 It also creates `sensor.ha_manager_health_score` so you can put the score on a
 dashboard or use it in an automation.
@@ -70,7 +85,6 @@ UK fire and rescue services recommend testing smoke alarms at least monthly.
 
 ## Roadmap
 
-- **Phase 2:** change log with undo, drag-and-drop room mover, naming checker.
 - **Phase 3:** plain-English explainer, battery forecaster, weekly report,
   live floor plan.
 

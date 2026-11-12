@@ -30,6 +30,7 @@ class EntityInfo:
     disabled: bool = False
     hidden: bool = False
     orphaned: bool = False  # left behind by an integration that has gone
+    registry_name: str | None = None  # the name the user has typed in, if any
     last_seen: datetime | None = None
     members: list[str] | None = None  # for groups
 
@@ -52,6 +53,7 @@ class DeviceInfo:
     disabled: bool = False
     is_service: bool = False  # "service" devices are not physical things
     orphaned: bool = False
+    user_name: str | None = None  # the name the user has typed in, if any
 
 
 @dataclass
@@ -94,6 +96,10 @@ class Snapshot:
     entities: dict[str, EntityInfo] = field(default_factory=dict)
     devices: dict[str, DeviceInfo] = field(default_factory=dict)
     areas: dict[str, str] = field(default_factory=dict)  # area_id -> name
+    area_floors: dict[str, str | None] = field(default_factory=dict)  # area_id -> floor_id
+    floors: dict[str, dict[str, Any]] = field(default_factory=dict)  # floor_id -> name, level
+    backup_known: bool = False  # True when Home Assistant reports backup times
+    last_backup: datetime | None = None
     consumers: list[Consumer] = field(default_factory=list)
     services: set[str] = field(default_factory=set)  # "domain.service"
     repairs: list[RepairIssue] = field(default_factory=list)

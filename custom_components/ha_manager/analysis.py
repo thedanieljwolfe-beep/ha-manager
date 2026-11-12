@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .const import (
+    BACKUP_MAX_AGE_DAYS,
     BATTERY_LOW,
     CRITICAL,
     CROSS_CHECK_DOMAINS,
@@ -22,11 +23,13 @@ from .const import (
     SCORE_CAPS,
     SCORE_WEIGHTS,
     SEVERITIES,
+    STYLE_ROOM_FIRST,
     TIDY,
     WARNING,
     ZOMBIE_DAYS,
 )
 from .models import Consumer, EntityInfo, Finding, Snapshot
+from .naming import NAMED_DOMAINS, check_names
 
 KIND_NAMES = {
     "automation": "automation",
@@ -68,6 +71,7 @@ class Analyser:
         self.tests: dict[str, list[str]] = store.get("safety_tests", {})
         self.excluded: set[str] = set(store.get("safety_excluded", []))
         self.ignored: set[str] = set(store.get("ignored", []))
+        self.naming_style: str = store.get("naming_style", STYLE_ROOM_FIRST)
         self.findings: list[Finding] = []
         self.safety_units: list[dict[str, Any]] = []
         self._safety_device_ids: set[str] = set()
@@ -114,6 +118,8 @@ class Analyser:
         self._check_batteries(by_device)
         activity = self._check_activity()
         self._check_repairs()
+        self._check_backup()
+        self._check_names()
 
         order = {severity: index for index, severity in enumerate(SEVERITIES)}
         self.findings.sort(key=lambda f: (order[f.severity], f.category, f.title))
@@ -621,6 +627,53 @@ class Analyser:
         rows.sort(key=lambda r: (order[r["status"]], r["name"].lower()))
         return rows
 
+    def _check_backup(self) -> None:
+        """Warn when the last automatic backup is getting old."""
+        if not self.snap.backup_known:
+            return
+        last = self.snap.last_backup
+        if last is not None and self.snap.now - last <= timedelta(days=BACKUP_MAX_AGE_DAYS):
+            return
+        if last is None:
+            title = "No automatic backup has completed yet"
+        else:
+            days = (self.snap.now - last).days
+            title = f"The last automatic backup was {days} days ago"
+        self._add(
+            Finding(
+                id="backup_old",
+                severity=WARNING,
+                category="Backups",
+                title=title,
+                detail="HA Manager can undo its own changes, but only a backup "
+                "protects you from everything else.",
+                advice="Turn on automatic backups, or run one now, under "
+                "Settings > System > Backups.",
+                link="/config/backup",
+            )
+        )
+
+    def _check_names(self) -> None:
+        """One tidy-up item pointing at the Names tab."""
+        issues = check_names(self.snap, self.naming_style)
+        if not issues:
+            return
+        self._add(
+            Finding(
+                id="names",
+                severity=TIDY,
+                category="Names",
+                title=f"{_plural(len(issues), 'name')} could be clearer",
+                detail="Duplicates, factory names, and names that do not match "
+                "the room they are in.",
+                advice="Open the Names tab to fix them one click at a time.",
+                items=[
+                    {"name": i["name"], "area": i["area"], "note": i["reason"]}
+                    for i in issues[:15]
+                ],
+            )
+        )
+
     def _check_repairs(self) -> None:
         """Pull in Home Assistant's own Repairs list, plus Watchman's counts."""
         severity_map = {"critical": CRITICAL, "error": WARNING, "warning": TIDY}
@@ -797,4 +850,57 @@ def blast_radius(snapshot: Snapshot, target_type: str, target_id: str) -> dict[s
         "used_by": used_by,
         "summary": summary,
         "safe": not used_by,
+    }
+
+
+def rooms(snapshot: Snapshot) -> dict[str, Any]:
+    """Everything the Rooms tab needs: floors, rooms and what is in them."""
+    counts: dict[str, int] = defaultdict(int)
+    for entity in snapshot.entities.values():
+        if entity.device_id and not entity.disabled:
+            counts[entity.device_id] += 1
+
+    items: list[dict[str, Any]] = [
+        {
+            "type": "device",
+            "id": device.device_id,
+            "name": device.name,
+            "area_id": device.area_id,
+            "detail": _plural(counts[device.device_id], "entity", "entities"),
+        }
+        for device in snapshot.devices.values()
+        if not device.disabled and not device.is_service and counts[device.device_id]
+    ]
+    items += [
+        {
+            "type": "entity",
+            "id": entity.entity_id,
+            "name": entity.name,
+            "area_id": entity.area_id,
+            "detail": entity.domain.replace("_", " "),
+        }
+        for entity in snapshot.entities.values()
+        if not entity.device_id
+        and entity.in_registry
+        and not entity.disabled
+        and not entity.hidden
+        and not entity.orphaned
+        and entity.domain in NAMED_DOMAINS
+    ]
+    items.sort(key=lambda item: item["name"].lower())
+
+    def floor_order(pair: tuple[str, dict[str, Any]]) -> tuple[float, str]:
+        level = pair[1].get("level")
+        return (-level if level is not None else float("inf"), pair[1]["name"].lower())
+
+    return {
+        "floors": [
+            {"id": floor_id, "name": floor["name"], "level": floor.get("level")}
+            for floor_id, floor in sorted(snapshot.floors.items(), key=floor_order)
+        ],
+        "areas": [
+            {"id": area_id, "name": name, "floor_id": snapshot.area_floors.get(area_id)}
+            for area_id, name in sorted(snapshot.areas.items(), key=lambda p: p[1].lower())
+        ],
+        "items": items,
     }
