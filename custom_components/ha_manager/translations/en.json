@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add HA Manager",
+        "description": "This adds an HA Manager page to the sidebar. It only reads your setup: nothing is renamed, moved or deleted."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "HA Manager is already set up."
+    }
+  }
+}
