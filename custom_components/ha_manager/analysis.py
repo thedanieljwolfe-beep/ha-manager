@@ -9,8 +9,10 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
 
+from .battery import forecast
 from .const import (
     BACKUP_MAX_AGE_DAYS,
+    BATTERY_FORECAST_DAYS,
     BATTERY_LOW,
     CRITICAL,
     CROSS_CHECK_DOMAINS,
@@ -74,6 +76,7 @@ class Analyser:
         self.naming_style: str = store.get("naming_style", STYLE_ROOM_FIRST)
         self.findings: list[Finding] = []
         self.safety_units: list[dict[str, Any]] = []
+        self.batteries: list[dict[str, Any]] = []
         self._safety_device_ids: set[str] = set()
         self._safety_entity_ids: set[str] = set()
 
@@ -140,6 +143,7 @@ class Analyser:
                 "test_interval_days": SAFETY_TEST_INTERVAL_DAYS,
             },
             "activity": activity,
+            "batteries": self.batteries,
             "totals": {
                 "entities": len(self.snap.entities),
                 "devices": len(self.snap.devices),
@@ -528,6 +532,7 @@ class Analyser:
                     low.append((level, {"entity_id": entity.entity_id, "name": label, "area": area, "note": f"{level:.0f}%"}))
             elif entity.domain == "binary_sensor" and entity.state == "on":
                 low.append((0.0, {"entity_id": entity.entity_id, "name": label, "area": area, "note": "reports low"}))
+        self._forecast_batteries()
         if low:
             low.sort(key=lambda pair: pair[0])
             self._add(
@@ -539,6 +544,72 @@ class Analyser:
                     detail=f"At or below {BATTERY_LOW}%.",
                     advice="Swap them before the device drops offline.",
                     items=[item for _, item in low],
+                )
+            )
+
+    def _forecast_batteries(self) -> None:
+        """Estimate how long every battery has left."""
+        for entity in self.snap.entities.values():
+            if (
+                entity.domain != "sensor"
+                or entity.device_class != "battery"
+                or entity.disabled
+                or entity.orphaned
+            ):
+                continue
+            level = _number(entity.state)
+            history = list(self.snap.battery_history.get(entity.entity_id, []))
+            if level is None and not history:
+                continue
+            device = self.snap.devices.get(entity.device_id or "")
+            estimate = forecast(history, self.snap.now)
+            self.batteries.append(
+                {
+                    "entity_id": entity.entity_id,
+                    "name": device.name if device else entity.name,
+                    "area": self._area(entity.area_id),
+                    "safety": entity.device_id in self._safety_device_ids,
+                    "offline": level is None,
+                    **estimate,
+                    "level": level if level is not None else estimate.get("level"),
+                }
+            )
+
+        def order(battery: dict[str, Any]) -> tuple[int, float]:
+            if battery["status"] == "forecast":
+                return (0, battery["days_left"])
+            return (1, battery["level"] if battery["level"] is not None else 101)
+
+        self.batteries.sort(key=order)
+        soon = [
+            b
+            for b in self.batteries
+            if b["status"] == "forecast"
+            and b["days_left"] <= BATTERY_FORECAST_DAYS
+            and (b["level"] or 0) > BATTERY_LOW
+        ]
+        if soon:
+            self._add(
+                Finding(
+                    id="battery_forecast",
+                    severity=TIDY,
+                    category="Batteries",
+                    title=f"{_plural(len(soon), 'battery', 'batteries')} likely to run out "
+                    f"within {BATTERY_FORECAST_DAYS} days",
+                    detail="Based on how fast each one has been dropping. A guide, "
+                    "not a promise.",
+                    advice="Add them to the shopping list. The Batteries tab has the "
+                    "full forecast.",
+                    items=[
+                        {
+                            "entity_id": b["entity_id"],
+                            "name": b["name"],
+                            "area": b["area"],
+                            "note": f"about {_plural(b['days_left'], 'day')} left, "
+                            f"now {b['level']:.0f}%",
+                        }
+                        for b in soon
+                    ],
                 )
             )
 
@@ -903,4 +974,33 @@ def rooms(snapshot: Snapshot) -> dict[str, Any]:
             for area_id, name in sorted(snapshot.areas.items(), key=lambda p: p[1].lower())
         ],
         "items": items,
+    }
+
+
+def plan(snapshot: Snapshot) -> dict[str, Any]:
+    """What the floor plan needs: which entities to watch in each room."""
+    by_area: dict[str, dict[str, list[str]]] = {
+        area_id: {"lights": [], "temps": [], "motion": [], "safety": [], "all": []}
+        for area_id in snapshot.areas
+    }
+    for entity in snapshot.entities.values():
+        room = by_area.get(entity.area_id or "")
+        if room is None or entity.disabled or entity.hidden or entity.orphaned:
+            continue
+        if entity.entity_category is None:
+            room["all"].append(entity.entity_id)
+        if entity.domain == "light":
+            room["lights"].append(entity.entity_id)
+        elif entity.domain == "sensor" and entity.device_class == "temperature":
+            room["temps"].append(entity.entity_id)
+        elif entity.domain == "binary_sensor" and entity.device_class in (
+            "motion", "occupancy", "presence",
+        ):
+            room["motion"].append(entity.entity_id)
+        elif entity.domain == "binary_sensor" and entity.device_class in SAFETY_DEVICE_CLASSES:
+            room["safety"].append(entity.entity_id)
+    base = rooms(snapshot)
+    return {
+        "floors": base["floors"],
+        "areas": [{**area, **by_area[area["id"]]} for area in base["areas"]],
     }

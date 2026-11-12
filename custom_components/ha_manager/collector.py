@@ -182,7 +182,8 @@ def _collect_automations_and_scripts(hass: HomeAssistant, snapshot: Snapshot) ->
                 consumer.areas = set(areas_in(hass, entity_id))
             except Exception:  # noqa: BLE001
                 _LOGGER.debug("Could not read references for %s", entity_id, exc_info=True)
-            refs = extract_references(raw_configs.get(entity_id), domains)
+            consumer.config = raw_configs.get(entity_id)
+            refs = extract_references(consumer.config, domains)
             consumer.entities |= refs.explicit
             consumer.mentioned = refs.templated - consumer.entities
             consumer.scripts_called = refs.scripts_called

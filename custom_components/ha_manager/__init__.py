@@ -32,6 +32,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HAManagerConfigEntry) ->
     await coordinator.async_load()
     entry.runtime_data = coordinator
     entry.async_on_unload(coordinator.async_start_counting())
+    entry.async_on_unload(coordinator.async_start_reports())
 
     async_register_commands(hass)
 

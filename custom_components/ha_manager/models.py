@@ -72,6 +72,7 @@ class Consumer:
     last_triggered: datetime | None = None
     triggers_24h: int | None = None
     edit_url: str | None = None
+    config: dict[str, Any] | None = None  # the raw settings, for the explainer
 
     @property
     def all_entities(self) -> set[str]:
@@ -100,6 +101,8 @@ class Snapshot:
     floors: dict[str, dict[str, Any]] = field(default_factory=dict)  # floor_id -> name, level
     backup_known: bool = False  # True when Home Assistant reports backup times
     last_backup: datetime | None = None
+    # entity_id -> [(when, percent)], one reading a day
+    battery_history: dict[str, list[tuple[datetime, float]]] = field(default_factory=dict)
     consumers: list[Consumer] = field(default_factory=list)
     services: set[str] = field(default_factory=set)  # "domain.service"
     repairs: list[RepairIssue] = field(default_factory=list)
