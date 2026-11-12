@@ -3,7 +3,7 @@
 from datetime import timedelta
 
 DOMAIN = "ha_manager"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 PANEL_URL_PATH = "ha-manager"
 PANEL_TITLE = "HA Manager"
@@ -54,6 +54,14 @@ BACKUP_MAX_AGE_DAYS = 7
 STYLE_ROOM_FIRST = "room_first"  # "Kitchen Ceiling Light"
 STYLE_NO_ROOM = "no_room"  # "Ceiling Light", the room is set separately
 NAMING_STYLES = (STYLE_ROOM_FIRST, STYLE_NO_ROOM)
+
+BATTERY_FORECAST_DAYS = 14  # warn when a battery has this long left
+BATTERY_HISTORY_DAYS = 180
+BATTERY_BACKFILL_DAYS = 120
+
+REPORT_HISTORY_KEEP = 26
+PLAN_STORAGE_KEY = f"{DOMAIN}_plan"
+PLAN_IMAGE_MAX = 2_000_000  # characters of data URL, roughly 1.5 MB of picture
 
 CHANGES_STORAGE_KEY = f"{DOMAIN}_changes"
 CHANGES_KEEP = 500

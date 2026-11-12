@@ -5,10 +5,15 @@ const TABS = [
   ["safety", "Life safety"],
   ["activity", "Automations"],
   ["blast", "Blast radius"],
+  ["batteries", "Batteries"],
+  ["plan", "Floor plan"],
   ["rooms", "Rooms"],
   ["names", "Names"],
   ["log", "Log"],
+  ["report", "Weekly report"],
 ];
+
+const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 const NAME_PROBLEMS = {
   wrong_room: "Wrong room in name",
@@ -129,6 +134,30 @@ const STYLE = `
   .result .type { flex:none; width:60px; color:var(--secondary-text-color,#727272); font-size:12px; text-transform:uppercase; }
   .verdict { font-size:18px; font-weight:500; margin:0 0 6px; }
   .error { color:var(--crit); }
+  .explain { background:var(--secondary-background-color,#f5f5f5); border-radius:8px; padding:10px 12px; margin-top:8px; }
+  .explain p { margin:4px 0; } .explain pre { margin:4px 0; white-space:pre-wrap; font:inherit; }
+  .linkbtn { background:none; border:none; padding:0; color:var(--hm-primary); cursor:pointer; font:inherit; font-size:13px; }
+  .meter { height:8px; border-radius:4px; background:var(--hm-divider); overflow:hidden; min-width:80px; }
+  .meter div { height:100%; background:var(--ok); } .meter.low div { background:var(--crit); } .meter.mid div { background:var(--warn); }
+  .spark { display:flex; align-items:flex-end; gap:4px; height:70px; margin-top:8px; }
+  .spark div { flex:1; max-width:28px; background:var(--hm-primary); border-radius:3px 3px 0 0; min-height:3px; }
+  .reportbox { white-space:pre-wrap; background:var(--secondary-background-color,#f5f5f5); border-radius:8px; padding:12px; }
+  .form { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+  .form label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--secondary-text-color,#727272); }
+  .tiles { display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); }
+  .room { background:var(--card-background-color,#fff); border-radius:12px; padding:12px; border:2px solid var(--hm-divider);
+    box-shadow:0 1px 3px rgba(0,0,0,.15); min-height:74px; }
+  .room.lit { border-color:#f5b400; box-shadow:0 0 18px rgba(245,180,0,.55); }
+  .room.bad { border-color:var(--crit); }
+  .room h3 { margin:0 0 4px; font-size:15px; font-weight:500; }
+  .room .live { font-size:13px; color:var(--secondary-text-color,#727272); line-height:1.5; }
+  .room .live b { color:var(--crit); font-weight:500; } .room .live i { color:#b07d00; font-style:normal; font-weight:500; }
+  .canvas { position:relative; border-radius:12px; overflow:hidden; background:var(--card-background-color,#fff);
+    touch-action:none; user-select:none; }
+  .canvas img { display:block; width:100%; pointer-events:none; }
+  .canvas .room { position:absolute; transform:translate(-50%,-50%); min-height:0; padding:6px 10px; max-width:150px;
+    background:color-mix(in srgb, var(--card-background-color,#fff) 88%, transparent); }
+  .canvas.edit .room { cursor:move; border-style:dashed; }
   .notice { background:var(--hm-primary); color:var(--text-primary-color,#fff); border-radius:10px; padding:10px 14px;
     margin-bottom:16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
   .notice span { flex:1; } .notice button { background:none; border:1px solid currentColor; color:inherit;
@@ -177,6 +206,14 @@ class HaManagerPanel extends HTMLElement {
     this._sel = new Set();
     this._roomFilter = "";
     this._notice = null;
+    this._explained = {};
+    this._report = null;
+    this._plan = null;
+    this._floor = null;
+    this._planEdit = false;
+    for (const type of ["pointerdown", "pointermove", "pointerup"]) {
+      this.shadowRoot.addEventListener(type, (ev) => this._onPointer(ev));
+    }
     this.shadowRoot.addEventListener("change", (ev) => this._onChange(ev));
     for (const type of ["dragstart", "dragover", "dragleave", "drop"]) {
       this.shadowRoot.addEventListener(type, (ev) => this._onDrag(ev));
@@ -201,6 +238,12 @@ class HaManagerPanel extends HTMLElement {
     const menu = this.shadowRoot.querySelector("ha-menu-button");
     if (menu) menu.hass = hass;
     if (first) this._load(false);
+    else if (this._tab === "plan" && !this._liveTimer) {
+      this._liveTimer = setTimeout(() => {
+        this._liveTimer = null;
+        this._updatePlanLive();
+      }, 1000);
+    }
   }
 
   set narrow(value) {
@@ -229,7 +272,8 @@ class HaManagerPanel extends HTMLElement {
     }
     this._busy = false;
     if (refresh) {
-      this._rooms = this._names = this._log = null;
+      this._rooms = this._names = this._log = this._report = this._plan = null;
+      this._explained = {};
     }
     this._render();
     this._loadTab();
@@ -243,6 +287,12 @@ class HaManagerPanel extends HTMLElement {
       },
       names: async () => {
         if (!this._names) this._names = await this._ws({ type: "ha_manager/names" });
+      },
+      report: async () => {
+        if (!this._report) this._report = await this._ws({ type: "ha_manager/report" });
+      },
+      plan: async () => {
+        if (!this._plan) this._plan = await this._ws({ type: "ha_manager/plan" });
       },
       log: async () => {
         if (!this._log) this._log = await this._ws({ type: "ha_manager/changes" });
@@ -258,6 +308,273 @@ class HaManagerPanel extends HTMLElement {
     if (this._tab !== "blast") this._render();
   }
 
+  async _explain(id, ai) {
+    const previous = this._explained[id];
+    this._explained[id] = { ...(previous || {}), loading: true };
+    this._render();
+    try {
+      this._explained[id] = await this._ws({ type: "ha_manager/explain", entity_id: id, ai });
+    } catch (err) {
+      this._explained[id] = { summary: (err && err.message) || "Could not explain that.", then: [], when: [], only_if: [] };
+    }
+    this._render();
+  }
+
+  async _saveReport() {
+    const get = (id) => this.shadowRoot.getElementById(id);
+    try {
+      this._report = await this._ws({
+        type: "ha_manager/report/settings",
+        enabled: get("report-enabled").checked,
+        weekday: Number(get("report-weekday").value),
+        hour: Number(get("report-hour").value),
+        notify: get("report-notify").value || null,
+      });
+      this._notice = { text: "Report settings saved." };
+    } catch (err) {
+      this._error = (err && err.message) || "Could not save that.";
+    }
+    this._render();
+  }
+
+  /* ---------- floor plan ---------- */
+
+  _floorKey() {
+    return this._floor || "_none";
+  }
+
+  _planAreas() {
+    const key = this._floor || null;
+    return this._plan.areas.filter((a) => (a.floor_id || null) === key);
+  }
+
+  _roomLive(area) {
+    const states = this._hass ? this._hass.states : {};
+    const state = (id) => (states[id] ? states[id].state : undefined);
+    const on = area.lights.filter((id) => state(id) === "on").length;
+    const temps = area.temps.map((id) => parseFloat(state(id))).filter((n) => !Number.isNaN(n));
+    const motion = area.motion.some((id) => state(id) === "on");
+    const alarm = area.safety.some((id) => state(id) === "on");
+    const offline = area.all.filter((id) => state(id) === "unavailable").length;
+    const bits = [];
+    if (alarm) bits.push("<b>ALARM</b>");
+    if (area.lights.length) bits.push(on ? `<i>${on} light${on === 1 ? "" : "s"} on</i>` : "Lights off");
+    if (temps.length) bits.push(`${(temps.reduce((a, b) => a + b, 0) / temps.length).toFixed(1)}°`);
+    if (motion) bits.push("Motion");
+    if (offline) bits.push(`<b>${offline} offline</b>`);
+    if (!bits.length) bits.push(area.all.length ? "Quiet" : "Nothing here yet");
+    return { html: bits.join(" · "), lit: on > 0, bad: alarm || offline > 0 };
+  }
+
+  _updatePlanLive() {
+    if (this._tab !== "plan" || !this._plan) return;
+    for (const el of this.shadowRoot.querySelectorAll(".room[data-area]")) {
+      const area = this._plan.areas.find((a) => a.id === el.dataset.area);
+      if (!area) continue;
+      const live = this._roomLive(area);
+      el.classList.toggle("lit", live.lit);
+      el.classList.toggle("bad", live.bad);
+      const box = el.querySelector(".live");
+      if (box && box.innerHTML !== live.html) box.innerHTML = live.html;
+    }
+  }
+
+  _positions() {
+    const layout = (this._plan.layouts || {})[this._floorKey()] || {};
+    const saved = layout.positions || {};
+    const areas = this._planAreas();
+    const cols = Math.ceil(Math.sqrt(areas.length || 1));
+    const rows = Math.ceil(areas.length / cols) || 1;
+    const result = {};
+    areas.forEach((area, index) => {
+      result[area.id] = saved[area.id] || [
+        ((index % cols) + 0.5) * (100 / cols),
+        (Math.floor(index / cols) + 0.5) * (100 / rows),
+      ];
+    });
+    return result;
+  }
+
+  _onPointer(ev) {
+    if (this._tab !== "plan" || !this._planEdit) return;
+    if (ev.type === "pointerdown") {
+      const room = ev.target.closest && ev.target.closest(".canvas .room");
+      if (!room) return;
+      this._dragRoom = room;
+      room.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+    } else if (ev.type === "pointermove" && this._dragRoom) {
+      const box = this.shadowRoot.querySelector(".canvas").getBoundingClientRect();
+      const x = Math.min(100, Math.max(0, ((ev.clientX - box.left) / box.width) * 100));
+      const y = Math.min(100, Math.max(0, ((ev.clientY - box.top) / box.height) * 100));
+      this._dragRoom.style.left = `${x}%`;
+      this._dragRoom.style.top = `${y}%`;
+      this._dragRoom.dataset.x = x.toFixed(2);
+      this._dragRoom.dataset.y = y.toFixed(2);
+    } else if (ev.type === "pointerup") {
+      this._dragRoom = null;
+    }
+  }
+
+  async _savePlan() {
+    const positions = {};
+    for (const el of this.shadowRoot.querySelectorAll(".canvas .room")) {
+      positions[el.dataset.area] = [Number(el.dataset.x), Number(el.dataset.y)];
+    }
+    try {
+      this._plan.layouts = await this._ws({ type: "ha_manager/plan/save", floor: this._floorKey(), positions });
+      this._planEdit = false;
+      this._notice = { text: "Layout saved." };
+    } catch (err) {
+      this._error = (err && err.message) || "Could not save the layout.";
+    }
+    this._render();
+  }
+
+  async _uploadPlan(file) {
+    try {
+      const url = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const img = await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = url;
+      });
+      const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const image = canvas.toDataURL("image/jpeg", 0.8);
+      this._plan.layouts = await this._ws({ type: "ha_manager/plan/save", floor: this._floorKey(), image });
+      this._planEdit = true;
+      this._notice = { text: "Picture added. Drag each room onto its spot, then press Save layout." };
+    } catch (err) {
+      this._error = (err && err.message) || "That picture could not be used.";
+    }
+    this._render();
+  }
+
+  _planTab() {
+    const p = this._plan;
+    if (!p) return `<div class="card">Loading the floor plan…</div>`;
+    if (!p.areas.length) {
+      return `<div class="card">No rooms yet. Create some under
+        <a data-act="nav" href="/config/areas/dashboard">Settings, Areas</a> and they will appear here.</div>`;
+    }
+    const floors = p.floors.map((f) => [f.id, f.name]);
+    if (p.areas.some((a) => !a.floor_id)) floors.push(["", floors.length ? "No floor" : "All rooms"]);
+    if (this._floor === null || !floors.some(([id]) => id === this._floor)) this._floor = floors[0][0];
+    const layout = (p.layouts || {})[this._floorKey()] || {};
+    const areas = this._planAreas();
+    const tile = (area, style, data) => {
+      const live = this._roomLive(area);
+      return `<div class="room ${live.lit ? "lit" : ""} ${live.bad ? "bad" : ""}" data-area="${esc(area.id)}" ${style} ${data}>
+        <h3>${esc(area.name)}</h3><div class="live">${live.html}</div></div>`;
+    };
+    let html = `<div class="card bar">
+      ${floors.length > 1 ? floors.map(([id, name]) => `<button class="btn ${id === this._floor ? "solid" : ""}" data-act="floor" data-id="${esc(id)}">${esc(name)}</button>`).join("") : ""}
+      <span style="flex:1"></span>
+      <input id="plan-file" type="file" accept="image/*" hidden>
+      ${
+        layout.image
+          ? this._planEdit
+            ? `<button class="btn solid" data-act="plan-save">Save layout</button>`
+            : `<button class="btn" data-act="plan-edit">Arrange rooms</button>`
+          : ""
+      }
+      <button class="btn" data-act="plan-upload">${layout.image ? "Change picture" : "Add a picture of this floor"}</button>
+      ${layout.image ? `<button class="btn" data-act="plan-remove">Remove picture</button>` : ""}
+    </div>`;
+    if (layout.image) {
+      const positions = this._positions();
+      html += `<div class="canvas ${this._planEdit ? "edit" : ""}"><img src="${esc(layout.image)}" alt="Floor plan">
+        ${areas
+          .map((a) => {
+            const [x, y] = positions[a.id];
+            return tile(a, `style="left:${x}%;top:${y}%"`, `data-x="${x}" data-y="${y}"`);
+          })
+          .join("")}</div>`;
+      if (this._planEdit) html += `<p class="muted">Drag each room label onto its place in the picture, then press Save layout.</p>`;
+    } else {
+      html += `<div class="tiles">${areas.map((a) => tile(a, "", "")).join("")}</div>
+        <p class="muted">Rooms glow when a light is on and go red when something in them is offline or a safety sensor is
+        detecting something. Add a photo or drawing of the floor to place the rooms where they really are.</p>`;
+    }
+    return html;
+  }
+
+  _batteriesTab() {
+    const list = this._data.batteries || [];
+    let html = `<div class="card"><strong>Battery forecast.</strong>
+      <div class="muted">Worked out from how fast each battery has been dropping since it was last changed.
+      Batteries often fall off a cliff at the end, so treat “days left” as a guide and swap early on anything
+      safety-related. A forecast needs about a week of readings.</div></div>`;
+    if (!list.length) return html + `<div class="card">No battery sensors found.</div>`;
+    const rows = list.map((b) => {
+      const level = b.level === null || b.level === undefined ? null : Math.round(b.level);
+      let outlook;
+      if (b.status === "forecast") {
+        const date = new Date(b.empty_on).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+        outlook = `<strong>About ${b.days_left} day${b.days_left === 1 ? "" : "s"}</strong>
+          <div class="muted">around ${date} · losing ${b.rate_per_day}% a day · ${b.confidence === "good" ? "good estimate" : "rough estimate"}</div>`;
+      } else if (b.status === "steady") {
+        outlook = `Holding steady<div class="muted">no drop seen in ${b.days_of_data} days</div>`;
+      } else {
+        outlook = `<span class="muted">Still learning (${b.days_of_data} day${b.days_of_data === 1 ? "" : "s"} of readings)</span>`;
+      }
+      return `<tr>
+        <td><a href="#" data-act="more-info" data-id="${esc(b.entity_id)}">${esc(b.name)}</a>
+          <div class="muted">${esc(b.area || "No room")}${b.safety ? " · life safety" : ""}${b.offline ? " · offline" : ""}</div></td>
+        <td>${level === null ? "–" : `${level}%<div class="meter ${level <= 15 ? "low" : level <= 35 ? "mid" : ""}"><div style="width:${level}%"></div></div>`}</td>
+        <td>${outlook}</td></tr>`;
+    });
+    return html + `<div class="card"><table><thead><tr><th>Device</th><th>Now</th><th>Outlook</th></tr></thead>
+      <tbody>${rows.join("")}</tbody></table></div>`;
+  }
+
+  _reportTab() {
+    const r = this._report;
+    if (!r) return `<div class="card">Loading the report…</div>`;
+    const s = r.settings;
+    const hours = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${h === s.hour ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("");
+    const days = WEEKDAYS.map((d, i) => `<option value="${i}" ${i === s.weekday ? "selected" : ""}>${d}</option>`).join("");
+    const targets = r.notify_services.map((n) => `<option value="${esc(n)}" ${n === s.notify ? "selected" : ""}>${esc(n.replace("mobile_app_", "").replace(/_/g, " "))}</option>`).join("");
+    let html = `<div class="card"><strong>Weekly report.</strong>
+      <div class="muted">A short summary once a week: the score, what is new, what got fixed, batteries to buy and
+      safety tests due. It always appears under Notifications in Home Assistant, and can go to your phone too.</div>
+      <div class="form" style="margin-top:12px">
+        <label><span><input type="checkbox" id="report-enabled" ${s.enabled ? "checked" : ""}> Send it every week</span></label>
+        <label>Day<select id="report-weekday">${days}</select></label>
+        <label>Time<select id="report-hour">${hours}</select></label>
+        <label>Also send to<select id="report-notify"><option value="">Nowhere else</option>${targets}</select></label>
+        <button class="btn solid" data-act="report-save">Save</button>
+        <button class="btn" data-act="report-send">Send one now</button>
+      </div></div>`;
+    if (r.preview) {
+      html += `<div class="card"><strong>If it were sent right now</strong>
+        <div class="reportbox" style="margin-top:8px">${esc(r.preview.text)}</div></div>`;
+    }
+    if (r.history.length) {
+      const bars = r.history
+        .map((h) => `<div style="height:${Math.max(4, h.score)}%" title="${new Date(h.when).toLocaleDateString()}: ${h.score}"></div>`)
+        .join("");
+      html += `<div class="card"><strong>Score, week by week</strong><div class="spark">${bars}</div>
+        <div class="muted">${r.history.length} week${r.history.length === 1 ? "" : "s"} so far. Latest: ${r.history[r.history.length - 1].score}.</div></div>`;
+    } else {
+      html += `<p class="muted">The week-by-week chart starts after the first scheduled report.</p>`;
+    }
+    return html;
+  }
+
   /* Run something that changes Home Assistant, then refresh everything. */
   async _change(message, describe) {
     this._error = "";
@@ -269,6 +586,7 @@ class HaManagerPanel extends HTMLElement {
       else this._names = null;
       this._log = null;
       this._targets = null;
+      this._plan = null;
       const change = result.change;
       if (change && change.items && change.items.length) {
         this._notice = { text: describe ? describe(change) : change.summary + ".", id: change.id };
@@ -319,6 +637,8 @@ class HaManagerPanel extends HTMLElement {
       this._render();
     } else if (act === "floor") {
       this._change({ type: "ha_manager/set_floor", area_id: el.dataset.id, floor_id: el.value || null });
+    } else if (el.id === "plan-file" && el.files && el.files[0]) {
+      this._uploadPlan(el.files[0]);
     } else if (act === "style") {
       this._ws({ type: "ha_manager/set_naming_style", style: el.value }).then((names) => {
         this._names = names;
@@ -378,6 +698,7 @@ class HaManagerPanel extends HTMLElement {
     const act = el.dataset.act;
     if (act === "tab") {
       this._tab = el.dataset.tab;
+      this._notice = null;
       this._render();
       this._loadTab();
     } else if (act === "rescan") {
@@ -397,6 +718,40 @@ class HaManagerPanel extends HTMLElement {
         unit_id: el.dataset.id,
         excluded: el.dataset.value === "1",
       });
+    } else if (act === "explain") {
+      this._explain(el.dataset.id, false);
+    } else if (act === "explain-ai") {
+      this._explain(el.dataset.id, true);
+    } else if (act === "explain-hide") {
+      delete this._explained[el.dataset.id];
+      this._render();
+    } else if (act === "report-save") {
+      this._saveReport();
+    } else if (act === "report-send") {
+      this._ws({ type: "ha_manager/report/send" }).then((report) => {
+        this._report = report;
+        this._notice = { text: "Report sent. Look for it under Notifications in the sidebar." };
+        this._render();
+      });
+    } else if (act === "floor") {
+      this._floor = el.dataset.id;
+      this._planEdit = false;
+      this._render();
+    } else if (act === "plan-edit") {
+      this._planEdit = true;
+      this._render();
+    } else if (act === "plan-save") {
+      this._savePlan();
+    } else if (act === "plan-upload") {
+      this.shadowRoot.getElementById("plan-file").click();
+    } else if (act === "plan-remove") {
+      if (window.confirm("Remove this floor's picture? The rooms go back to simple tiles.")) {
+        this._ws({ type: "ha_manager/plan/save", floor: this._floorKey(), image: null }).then((layouts) => {
+          this._plan.layouts = layouts;
+          this._planEdit = false;
+          this._render();
+        });
+      }
     } else if (act === "undo") {
       this._undo(el.dataset.id);
     } else if (act === "dismiss") {
@@ -492,6 +847,9 @@ class HaManagerPanel extends HTMLElement {
     else if (this._tab === "safety") body += this._safety();
     else if (this._tab === "activity") body += this._activity();
     else if (this._tab === "rooms") body += this._roomsTab();
+    else if (this._tab === "batteries") body += this._batteriesTab();
+    else if (this._tab === "report") body += this._reportTab();
+    else if (this._tab === "plan") body += this._planTab();
     else if (this._tab === "names") body += this._namesTab();
     else if (this._tab === "log") body += this._logTab();
     else body += this._blastTab();
@@ -622,6 +980,27 @@ class HaManagerPanel extends HTMLElement {
     return html + `<div class="units">${cards.join("")}</div>`;
   }
 
+  _explainBox(id) {
+    const e = this._explained[id];
+    if (!e) return `<button class="linkbtn" data-act="explain" data-id="${esc(id)}">What does this do?</button>`;
+    if (e.loading && !e.summary) return `<div class="explain muted">Reading it…</div>`;
+    const list = (title, lines) =>
+      lines && lines.length ? `<p class="muted">${title}</p><pre>${lines.map((l) => esc(l.replace(/^(\s*)/, "$1• "))).join("\n")}</pre>` : "";
+    let ai = "";
+    if (e.ai_text) ai = `<p class="muted">In the AI’s words</p><p>${esc(e.ai_text)}</p>`;
+    else if (e.loading) ai = `<p class="muted">Asking the AI…</p>`;
+    else if (e.ai_error) ai = `<p class="error">The AI could not answer: ${esc(e.ai_error)}</p>`;
+    const askAi =
+      e.ai_available && !e.ai_text && !e.loading
+        ? `<button class="linkbtn" data-act="explain-ai" data-id="${esc(id)}">Ask Home Assistant’s AI for a friendlier version</button> · `
+        : "";
+    return `<div class="explain"><p><strong>${esc(e.summary)}</strong></p>
+      ${list("Starts when any of these happen", e.when && e.when.length > 1 ? e.when : [])}
+      ${list("Steps", e.then && (e.then.length > 3 || e.note || e.then.some((l) => l.startsWith(" "))) ? e.then : [])}
+      ${e.note ? `<p class="muted">${esc(e.note)}</p>` : ""}${ai}
+      <p>${askAi}<button class="linkbtn" data-act="explain-hide" data-id="${esc(id)}">Hide</button></p></div>`;
+  }
+
   _activity() {
     const rows = this._data.activity;
     let html = "";
@@ -636,7 +1015,8 @@ class HaManagerPanel extends HTMLElement {
         ? `<a data-act="nav" href="${esc(r.edit_url)}">${esc(r.name)}</a>`
         : esc(r.name);
       return `<tr>
-        <td>${name}<div class="muted">${esc(r.kind)}${r.note ? " · " + esc(r.note) : ""}</div></td>
+        <td>${name}<div class="muted">${esc(r.kind)}${r.note ? " · " + esc(r.note) : ""}</div>
+          ${this._explainBox(r.entity_id)}</td>
         <td><span class="chip ${r.status}">${STATUS[r.status]}</span></td>
         <td>${ago(r.last_triggered)}</td>
         <td>${r.triggers_24h === null || r.triggers_24h === undefined ? "–" : r.triggers_24h}</td></tr>`;

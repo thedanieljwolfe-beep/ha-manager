@@ -9,7 +9,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
-from .analysis import blast_radius, rooms, targets
+from .analysis import blast_radius, plan, rooms, targets
 from .changes import ChangeError
 from .const import DOMAIN, NAMING_STYLES
 from .naming import check_names
@@ -34,6 +34,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_scan, ws_targets, ws_blast_radius, ws_log_test, ws_exclude, ws_ignore,
         ws_rooms, ws_move, ws_set_floor, ws_names, ws_naming_style, ws_rename,
         ws_changes, ws_undo,
+        ws_explain, ws_report, ws_report_settings, ws_report_send,
+        ws_plan, ws_plan_save,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -297,3 +299,124 @@ async def ws_undo(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
         connection.send_error(msg["id"], "change_failed", str(err))
         return
     connection.send_result(msg["id"], result)
+
+
+# ----- Phase 3: explainer, weekly report and floor plan ------------------
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_manager/explain",
+        vol.Required("entity_id"): str,
+        vol.Optional("ai", default=False): bool,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_explain(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """Explain an automation or script in plain English."""
+    coordinator, _ = await _snapshot(hass, connection, msg)
+    if coordinator is None:
+        return
+    try:
+        result = await coordinator.async_explain(msg["entity_id"], msg["ai"])
+    except ChangeError as err:
+        connection.send_error(msg["id"], "not_found", str(err))
+        return
+    connection.send_result(msg["id"], result)
+
+
+def _report(hass: HomeAssistant, coordinator) -> dict[str, Any]:
+    settings = coordinator.saved["report"]
+    preview = coordinator.report_preview()
+    if preview:
+        preview = {k: v for k, v in preview.items() if k != "summary"}
+    return {
+        "settings": {k: settings[k] for k in ("enabled", "weekday", "hour", "notify")},
+        "last": settings["last"],
+        "preview": preview,
+        "history": [{"when": h["when"], "score": h["score"]} for h in settings["history"]],
+        "notify_services": sorted(
+            name
+            for name in hass.services.async_services().get("notify", {})
+            if name not in ("send_message", "persistent_notification")
+        ),
+    }
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ha_manager/report"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_report(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """The weekly report: settings, a preview and the score history."""
+    coordinator, _ = await _snapshot(hass, connection, msg)
+    if coordinator is not None:
+        connection.send_result(msg["id"], _report(hass, coordinator))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_manager/report/settings",
+        vol.Required("enabled"): bool,
+        vol.Required("weekday"): vol.All(int, vol.Range(min=0, max=6)),
+        vol.Required("hour"): vol.All(int, vol.Range(min=0, max=23)),
+        vol.Required("notify"): vol.Any(str, None),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_report_settings(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """Change when and where the weekly report is sent."""
+    coordinator, _ = await _snapshot(hass, connection, msg)
+    if coordinator is None:
+        return
+    await coordinator.async_set_report_settings(
+        msg["enabled"], msg["weekday"], msg["hour"], msg["notify"]
+    )
+    connection.send_result(msg["id"], _report(hass, coordinator))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ha_manager/report/send"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_report_send(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """Send the report now, as a try-out."""
+    coordinator, _ = await _snapshot(hass, connection, msg)
+    if coordinator is None:
+        return
+    await coordinator.async_send_report()
+    connection.send_result(msg["id"], _report(hass, coordinator))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ha_manager/plan"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_plan(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """Rooms, what to watch in each, and the saved layouts."""
+    coordinator, snapshot = await _snapshot(hass, connection, msg)
+    if coordinator is not None:
+        connection.send_result(msg["id"], {**plan(snapshot), "layouts": coordinator.layouts})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_manager/plan/save",
+        vol.Required("floor"): str,
+        vol.Optional("positions"): {str: vol.All([vol.Coerce(float)], vol.Length(min=2, max=2))},
+        vol.Optional("image"): vol.Any(str, None),
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_plan_save(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """Save a floor's layout and, if given, its picture."""
+    if (coordinator := _coordinator(hass, connection, msg)) is None:
+        return
+    try:
+        await coordinator.async_save_layout(
+            msg["floor"], msg.get("positions"), msg.get("image"), "image" in msg
+        )
+    except ChangeError as err:
+        connection.send_error(msg["id"], "invalid", str(err))
+        return
+    connection.send_result(msg["id"], coordinator.layouts)

@@ -27,6 +27,25 @@ what is broken, what is left over, and what to fix first.
   [Spook](https://spook.boo). If [Watchman](https://github.com/dummylabs/thewatchman)
   is installed its counts are shown too.
 
+### Understanding
+
+- **Plain-English explainer.** On the Automations tab, "What does this do?"
+  turns any automation or script into a sentence, such as "When Hall Motion
+  turns on, but only if it is after 23:00, it turns on Hall Light at 20%
+  brightness." This is worked out on your own machine with no AI. If you have
+  an AI set up in Home Assistant (an AI Task entity), you can also ask it for a
+  friendlier version. That sends the automation's settings to whichever AI you
+  chose there, and only when you press the button.
+- **Battery forecast.** Estimates how many days each battery has left from how
+  fast it has been dropping, using Home Assistant's own history where it has
+  it. A guide, not a promise: batteries often die suddenly at the end.
+- **Live floor plan.** Every room as a tile that glows when a light is on and
+  turns red when something is offline. Add a photo or drawing of each floor
+  and drag the rooms onto it.
+- **Weekly report.** Once a week: the score and how it moved, what is new,
+  what got fixed, batteries to buy and safety tests due. Appears under
+  Notifications, and can be sent to your phone.
+
 ### Changing (always logged, always undoable)
 
 - **Rooms.** Drag devices between rooms, or tick several and move them
@@ -82,11 +101,6 @@ Watchman are shown for cross-checking but are not counted twice.
 This page is a reminder and a log. It is **not** a substitute for pressing the
 test button on your alarms, and it cannot tell you that an alarm will sound.
 UK fire and rescue services recommend testing smoke alarms at least monthly.
-
-## Roadmap
-
-- **Phase 3:** plain-English explainer, battery forecaster, weekly report,
-  live floor plan.
 
 ## Development
 
