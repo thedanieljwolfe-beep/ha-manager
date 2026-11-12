@@ -16,6 +16,7 @@ from homeassistant.helpers import (
     area_registry as ar,
     device_registry as dr,
     entity_registry as er,
+    floor_registry as fr,
     issue_registry as ir,
 )
 from homeassistant.helpers.translation import async_get_translations
@@ -57,6 +58,9 @@ def _collect_entities(hass: HomeAssistant, snapshot: Snapshot) -> None:
     devices = dr.async_get(hass)
     for area in ar.async_get(hass).async_list_areas():
         snapshot.areas[area.id] = area.name
+        snapshot.area_floors[area.id] = area.floor_id
+    for floor in fr.async_get(hass).async_list_floors():
+        snapshot.floors[floor.floor_id] = {"name": floor.name, "level": floor.level}
 
     for device in devices.devices.values():
         entry_ids = getattr(device, "config_entries", set())
@@ -68,6 +72,7 @@ def _collect_entities(hass: HomeAssistant, snapshot: Snapshot) -> None:
             is_service=str(device.entry_type or "") == "service",
             orphaned=bool(entry_ids)
             and not any(hass.config_entries.async_get_entry(e) for e in entry_ids),
+            user_name=device.name_by_user,
         )
 
     def last_seen(state: State | None) -> datetime | None:
@@ -103,9 +108,13 @@ def _collect_entities(hass: HomeAssistant, snapshot: Snapshot) -> None:
             disabled=entry.disabled_by is not None,
             hidden=entry.hidden_by is not None,
             orphaned=orphaned,
+            registry_name=entry.name,
             last_seen=last_seen(state),
             members=list(members) if isinstance(members, (list, tuple)) else None,
         )
+        if entry.platform == "backup" and entry.unique_id == "last_successful_automatic_backup":
+            snapshot.backup_known = entry.disabled_by is None
+            snapshot.last_backup = _as_datetime(state.state) if state else None
 
     for state in hass.states.async_all():
         if state.entity_id in seen:

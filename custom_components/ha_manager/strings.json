@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Add HA Manager",
-        "description": "This adds an HA Manager page to the sidebar. It only reads your setup: nothing is renamed, moved or deleted."
+        "description": "This adds an HA Manager page to the sidebar. It checks your setup for problems. It only changes anything when you ask it to on the Rooms or Names tabs, and every change is logged and can be undone."
       }
     },
     "abort": {

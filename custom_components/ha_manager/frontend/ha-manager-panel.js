@@ -5,7 +5,18 @@ const TABS = [
   ["safety", "Life safety"],
   ["activity", "Automations"],
   ["blast", "Blast radius"],
+  ["rooms", "Rooms"],
+  ["names", "Names"],
+  ["log", "Log"],
 ];
+
+const NAME_PROBLEMS = {
+  wrong_room: "Wrong room in name",
+  duplicate: "Duplicate",
+  technical: "Technical name",
+  no_room: "No room in name",
+  has_room: "Room repeated",
+};
 
 const SEVERITY = {
   critical: { label: "Critical", hint: "Fix these first" },
@@ -118,6 +129,33 @@ const STYLE = `
   .result .type { flex:none; width:60px; color:var(--secondary-text-color,#727272); font-size:12px; text-transform:uppercase; }
   .verdict { font-size:18px; font-weight:500; margin:0 0 6px; }
   .error { color:var(--crit); }
+  .notice { background:var(--hm-primary); color:var(--text-primary-color,#fff); border-radius:10px; padding:10px 14px;
+    margin-bottom:16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  .notice span { flex:1; } .notice button { background:none; border:1px solid currentColor; color:inherit;
+    border-radius:14px; padding:4px 12px; cursor:pointer; font:inherit; }
+  .bar { position:sticky; top:56px; z-index:1; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  select, input[type=text] { font:inherit; padding:8px; border-radius:8px; border:1px solid var(--hm-divider);
+    background:var(--card-background-color,#fff); color:inherit; max-width:100%; }
+  .board { display:grid; gap:12px; grid-template-columns:repeat(auto-fill,minmax(230px,1fr)); align-items:start; }
+  .col { background:var(--secondary-background-color,#f0f0f0); border-radius:12px; padding:10px; min-height:70px;
+    border:2px dashed transparent; }
+  .col.over { border-color:var(--hm-primary); }
+  .col.homeless { background:color-mix(in srgb, var(--warn) 18%, var(--card-background-color,#fff)); }
+  .col h3 { margin:0 0 2px; font-size:15px; font-weight:500; display:flex; justify-content:space-between; gap:8px; }
+  .col select { font-size:12px; padding:3px; margin:2px 0 8px; width:100%; }
+  .thing { background:var(--card-background-color,#fff); border-radius:8px; padding:8px; margin:6px 0; display:flex;
+    gap:8px; align-items:flex-start; cursor:grab; box-shadow:0 1px 2px rgba(0,0,0,.15); }
+  .thing.sel { outline:2px solid var(--hm-primary); }
+  .thing input { margin-top:3px; }
+  .thing .n { font-size:14px; overflow-wrap:anywhere; }
+  .namerow { display:grid; grid-template-columns:1fr 1.2fr auto; gap:10px; align-items:center; padding:10px 0;
+    border-bottom:1px solid var(--hm-divider); }
+  .namerow input { width:100%; box-sizing:border-box; }
+  .entry { border-bottom:1px solid var(--hm-divider); padding:12px 0; }
+  .entry.undone { opacity:.6; }
+  .entry .top { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .entry .top strong { flex:1; font-weight:500; }
+  @media (max-width:600px) { .namerow { grid-template-columns:1fr; } }
   @media (max-width:600px) { summary { flex-direction:column; gap:2px; } summary .cat { min-width:0; } }
 `;
 
@@ -133,6 +171,16 @@ class HaManagerPanel extends HTMLElement {
     this._busy = false;
     this._error = "";
     this._open = new Set();
+    this._rooms = null;
+    this._names = null;
+    this._log = null;
+    this._sel = new Set();
+    this._roomFilter = "";
+    this._notice = null;
+    this.shadowRoot.addEventListener("change", (ev) => this._onChange(ev));
+    for (const type of ["dragstart", "dragover", "dragleave", "drop"]) {
+      this.shadowRoot.addEventListener(type, (ev) => this._onDrag(ev));
+    }
     this.shadowRoot.addEventListener("click", (ev) => this._onClick(ev));
     this.shadowRoot.addEventListener("input", (ev) => this._onInput(ev));
     this.shadowRoot.addEventListener(
@@ -180,8 +228,129 @@ class HaManagerPanel extends HTMLElement {
       this._error = (err && err.message) || "Could not load the scan.";
     }
     this._busy = false;
+    if (refresh) {
+      this._rooms = this._names = this._log = null;
+    }
     this._render();
-    if (this._tab === "blast") this._loadTargets();
+    this._loadTab();
+  }
+
+  async _loadTab() {
+    const loaders = {
+      blast: () => this._loadTargets(),
+      rooms: async () => {
+        if (!this._rooms) this._rooms = await this._ws({ type: "ha_manager/rooms" });
+      },
+      names: async () => {
+        if (!this._names) this._names = await this._ws({ type: "ha_manager/names" });
+      },
+      log: async () => {
+        if (!this._log) this._log = await this._ws({ type: "ha_manager/changes" });
+      },
+    };
+    const loader = loaders[this._tab];
+    if (!loader) return;
+    try {
+      await loader();
+    } catch (err) {
+      this._error = (err && err.message) || "Could not load that.";
+    }
+    if (this._tab !== "blast") this._render();
+  }
+
+  /* Run something that changes Home Assistant, then refresh everything. */
+  async _change(message, describe) {
+    this._error = "";
+    try {
+      const result = await this._ws(message);
+      if (result.rooms) this._rooms = result.rooms;
+      else this._rooms = null;
+      if (result.names) this._names = result.names;
+      else this._names = null;
+      this._log = null;
+      this._targets = null;
+      const change = result.change;
+      if (change && change.items && change.items.length) {
+        this._notice = { text: describe ? describe(change) : change.summary + ".", id: change.id };
+      } else if (change) {
+        this._notice = { text: "Nothing needed changing." };
+      }
+      this._ws({ type: "ha_manager/scan" }).then((data) => {
+        this._data = data;
+      });
+      return result;
+    } catch (err) {
+      this._error = (err && err.message) || "That did not work.";
+      return null;
+    } finally {
+      this._render();
+      this._loadTab();
+    }
+  }
+
+  async _undo(id) {
+    const result = await this._change({ type: "ha_manager/undo", change_id: id });
+    if (!result) return;
+    const skipped = result.skipped.length;
+    this._notice = {
+      text:
+        `Undone: ${result.reverted} put back` +
+        (skipped ? `, ${skipped} left alone because they had changed again or gone.` : "."),
+    };
+    this._render();
+  }
+
+  _move(keys, areaId) {
+    const items = [...keys].map((key) => {
+      const [type, ...rest] = key.split("|");
+      return { type, id: rest.join("|") };
+    });
+    if (!items.length) return;
+    this._sel.clear();
+    this._change({ type: "ha_manager/move", items, area_id: areaId || null });
+  }
+
+  _onChange(ev) {
+    const el = ev.target;
+    const act = el.dataset && el.dataset.change;
+    if (act === "select") {
+      if (el.checked) this._sel.add(el.dataset.key);
+      else this._sel.delete(el.dataset.key);
+      this._render();
+    } else if (act === "floor") {
+      this._change({ type: "ha_manager/set_floor", area_id: el.dataset.id, floor_id: el.value || null });
+    } else if (act === "style") {
+      this._ws({ type: "ha_manager/set_naming_style", style: el.value }).then((names) => {
+        this._names = names;
+        this._render();
+      });
+    }
+  }
+
+  _onDrag(ev) {
+    if (this._tab !== "rooms") return;
+    if (ev.type === "dragstart") {
+      const card = ev.target.closest && ev.target.closest(".thing");
+      if (!card) return;
+      const key = card.dataset.key;
+      this._dragging = this._sel.has(key) ? new Set(this._sel) : new Set([key]);
+      ev.dataTransfer.effectAllowed = "move";
+      ev.dataTransfer.setData("text/plain", key);
+      return;
+    }
+    const col = ev.target.closest && ev.target.closest(".col");
+    if (!col || !this._dragging) return;
+    if (ev.type === "dragover") {
+      ev.preventDefault();
+      col.classList.add("over");
+    } else if (ev.type === "dragleave") {
+      if (!col.contains(ev.relatedTarget)) col.classList.remove("over");
+    } else if (ev.type === "drop") {
+      ev.preventDefault();
+      const keys = this._dragging;
+      this._dragging = null;
+      this._move(keys, col.dataset.area);
+    }
   }
 
   async _loadTargets() {
@@ -210,7 +379,7 @@ class HaManagerPanel extends HTMLElement {
     if (act === "tab") {
       this._tab = el.dataset.tab;
       this._render();
-      if (this._tab === "blast") this._loadTargets();
+      this._loadTab();
     } else if (act === "rescan") {
       this._load(true);
     } else if (act === "ignore") {
@@ -228,6 +397,33 @@ class HaManagerPanel extends HTMLElement {
         unit_id: el.dataset.id,
         excluded: el.dataset.value === "1",
       });
+    } else if (act === "undo") {
+      this._undo(el.dataset.id);
+    } else if (act === "dismiss") {
+      this._notice = null;
+      this._render();
+    } else if (act === "move-selected") {
+      const select = this.shadowRoot.getElementById("move-to");
+      if (select && select.value !== "") this._move(this._sel, select.value === "__none__" ? null : select.value);
+    } else if (act === "clear-selection") {
+      this._sel.clear();
+      this._render();
+    } else if (act === "rename") {
+      const input = this.shadowRoot.querySelector(`input[data-name-for="${CSS.escape(el.dataset.key)}"]`);
+      const name = input ? input.value.trim() : "";
+      if (name) {
+        this._change({
+          type: "ha_manager/rename",
+          items: [{ type: el.dataset.type, id: el.dataset.id, name }],
+        });
+      }
+    } else if (act === "rename-all") {
+      const items = (this._names ? this._names.issues : [])
+        .filter((i) => i.suggestion)
+        .map((i) => ({ type: i.type, id: i.id, name: i.suggestion }));
+      if (items.length && window.confirm(`Rename ${items.length} things to the suggested names? You can undo this from the Log tab.`)) {
+        this._change({ type: "ha_manager/rename", items });
+      }
     } else if (act === "pick") {
       this._pick(el.dataset.type, el.dataset.id);
     } else if (act === "more-info") {
@@ -247,6 +443,15 @@ class HaManagerPanel extends HTMLElement {
   }
 
   _onInput(ev) {
+    if (ev.target.id === "room-filter") {
+      this._roomFilter = ev.target.value;
+      const words = this._roomFilter.toLowerCase().split(/\s+/).filter(Boolean);
+      for (const card of this.shadowRoot.querySelectorAll(".thing")) {
+        const text = card.dataset.text;
+        card.style.display = words.every((w) => text.includes(w)) ? "" : "none";
+      }
+      return;
+    }
     if (ev.target.id !== "search") return;
     this._query = ev.target.value;
     this._blast = null;
@@ -276,11 +481,19 @@ class HaManagerPanel extends HTMLElement {
     ).join("");
     let body = "";
     if (this._error) body += `<div class="card error">${esc(this._error)}</div>`;
+    if (this._notice) {
+      body += `<div class="notice"><span>${esc(this._notice.text)}</span>
+        ${this._notice.id ? `<button data-act="undo" data-id="${esc(this._notice.id)}">Undo</button>` : ""}
+        <button data-act="dismiss">OK</button></div>`;
+    }
     if (!this._data) {
       body += `<div class="card">${this._busy ? "Scanning your setup…" : "No scan yet."}</div>`;
     } else if (this._tab === "overview") body += this._overview();
     else if (this._tab === "safety") body += this._safety();
     else if (this._tab === "activity") body += this._activity();
+    else if (this._tab === "rooms") body += this._roomsTab();
+    else if (this._tab === "names") body += this._namesTab();
+    else if (this._tab === "log") body += this._logTab();
     else body += this._blastTab();
 
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
@@ -471,6 +684,122 @@ class HaManagerPanel extends HTMLElement {
       html += `</div>`;
     }
     return html;
+  }
+
+  _roomsTab() {
+    const r = this._rooms;
+    if (!r) return `<div class="card">Loading your rooms…</div>`;
+    const floorOptions = (current) =>
+      `<option value="">No floor</option>` +
+      r.floors
+        .map((f) => `<option value="${esc(f.id)}" ${f.id === current ? "selected" : ""}>${esc(f.name)}</option>`)
+        .join("");
+    const card = (item) => {
+      const key = `${item.type}|${item.id}`;
+      const selected = this._sel.has(key);
+      return `<div class="thing ${selected ? "sel" : ""}" draggable="true" data-key="${esc(key)}"
+          data-text="${esc((item.name + " " + item.detail).toLowerCase())}">
+        <input type="checkbox" data-change="select" data-key="${esc(key)}" ${selected ? "checked" : ""}
+          aria-label="Select ${esc(item.name)}">
+        <div><div class="n">${esc(item.name)}</div><div class="muted">${esc(item.detail)}</div></div></div>`;
+    };
+    const column = (areaId, name, floorId) => {
+      const items = r.items.filter((i) => (i.area_id || "") === areaId);
+      const floor = areaId
+        ? `<select data-change="floor" data-id="${esc(areaId)}" aria-label="Floor for ${esc(name)}">${floorOptions(floorId)}</select>`
+        : "";
+      return `<div class="col ${areaId ? "" : "homeless"}" data-area="${esc(areaId)}">
+        <h3><span>${esc(name)}</span><span class="muted">${items.length}</span></h3>${floor}
+        ${items.map(card).join("")}</div>`;
+    };
+    const roomOptions = r.areas.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("");
+    let html = `<div class="card bar">
+      <input id="room-filter" type="text" placeholder="Filter by name" value="${esc(this._roomFilter)}" style="flex:1;min-width:160px">
+      ${
+        this._sel.size
+          ? `<strong>${this._sel.size} selected</strong>
+        <select id="move-to" aria-label="Move to"><option value="">Move to…</option>${roomOptions}
+          <option value="__none__">No room</option></select>
+        <button class="btn solid" data-act="move-selected">Move</button>
+        <button class="btn" data-act="clear-selection">Clear</button>`
+          : `<span class="muted">Drag a card to another room, or tick several and move them together.</span>`
+      }</div>`;
+    const homeless = r.items.filter((i) => !i.area_id).length;
+    if (homeless || !r.areas.length) {
+      html += `<h2>Not in a room <small>${homeless} to place</small></h2><div class="board">${column("", "No room", null)}</div>`;
+    }
+    const groups = r.floors.map((f) => [f.id, f.name]);
+    groups.push([null, r.floors.length ? "Rooms with no floor" : "Rooms"]);
+    for (const [floorId, floorName] of groups) {
+      const areas = r.areas.filter((a) => (a.floor_id || null) === floorId);
+      if (!areas.length) continue;
+      html += `<h2>${esc(floorName)} <small>${areas.length} rooms</small></h2>
+        <div class="board">${areas.map((a) => column(a.id, a.name, a.floor_id)).join("")}</div>`;
+    }
+    if (!homeless && r.areas.length) {
+      html += `<h2>Not in a room</h2><div class="board">${column("", "No room (drop here to remove)", null)}</div>`;
+    }
+    html += `<p class="muted">Rooms and floors themselves are created in Home Assistant under
+      <a data-act="nav" href="/config/areas/dashboard">Settings, Areas</a>. Every move here is recorded on the Log tab and can be undone.</p>`;
+    return html;
+  }
+
+  _namesTab() {
+    const n = this._names;
+    if (!n) return `<div class="card">Checking your names…</div>`;
+    const withSuggestion = n.issues.filter((i) => i.suggestion).length;
+    let html = `<div class="card"><strong>Which naming style do you want?</strong>
+      <p><select data-change="style" aria-label="Naming style">
+        <option value="room_first" ${n.style === "room_first" ? "selected" : ""}>Room first, e.g. “Kitchen Ceiling Light”</option>
+        <option value="no_room" ${n.style === "no_room" ? "selected" : ""}>No room in the name, e.g. “Ceiling Light”</option>
+      </select></p>
+      <div class="muted">Only the friendly name you see on screen is changed. The entity ID behind it stays the same,
+      so automations, scripts and dashboards keep working. Every rename is recorded on the Log tab and can be undone.</div>
+      ${
+        withSuggestion
+          ? `<div class="actions"><button class="btn solid" data-act="rename-all">Apply all ${withSuggestion} suggestions</button></div>`
+          : ""
+      }</div>`;
+    if (!n.issues.length) return html + `<div class="card">Every name fits. Nothing to do.</div>`;
+    const rows = n.issues.map((i) => {
+      const key = `${i.type}|${i.id}`;
+      return `<div class="namerow">
+        <div><div>${esc(i.name)}</div>
+          <div class="muted">${esc(i.area || "No room")} · ${i.type === "device" ? "device" : esc(i.id)}</div></div>
+        <div><span class="chip tidy">${NAME_PROBLEMS[i.problem]}</span> <span class="muted">${esc(i.reason)}</span>
+          <input type="text" data-name-for="${esc(key)}" value="${esc(i.suggestion || i.name)}" aria-label="New name for ${esc(i.name)}"></div>
+        <button class="btn" data-act="rename" data-key="${esc(key)}" data-type="${i.type}" data-id="${esc(i.id)}">Rename</button>
+      </div>`;
+    });
+    return html + `<div class="card">${rows.join("")}</div>`;
+  }
+
+  _logTab() {
+    const log = this._log;
+    if (!log) return `<div class="card">Loading the log…</div>`;
+    let html = `<div class="card"><strong>Captain’s Log.</strong>
+      <div class="muted">Every change HA Manager has made, newest first. Undo puts things back as they were,
+      and leaves alone anything that has been changed again since.</div></div>`;
+    if (!log.length) return html + `<div class="card">No changes yet. Nothing has been touched.</div>`;
+    const entries = log.map((e) => {
+      const items = e.items
+        .map((i) => `<li>${esc(i.label)} <span class="muted">· ${esc(i.before_text)} → ${esc(i.after_text)}</span></li>`)
+        .join("");
+      const skipped = (e.undo_skipped || [])
+        .map((s) => `<li>${esc(s.label)} <span class="muted">· not put back: ${esc(s.reason)}</span></li>`)
+        .join("");
+      return `<div class="entry ${e.undone ? "undone" : ""}">
+        <div class="top"><strong>${esc(e.summary)}</strong>
+          <span class="muted">${ago(e.when)}${e.user ? " · " + esc(e.user) : ""}</span>
+          ${
+            e.undone
+              ? `<span class="chip off">Undone ${ago(e.undone)}</span>`
+              : `<button class="btn" data-act="undo" data-id="${esc(e.id)}">Undo</button>`
+          }</div>
+        <details><summary class="muted">${e.items.length} ${e.items.length === 1 ? "change" : "changes"}</summary>
+          <ul class="items">${items}${skipped}</ul></details></div>`;
+    });
+    return html + `<div class="card">${entries.join("")}</div>`;
   }
 
   _renderResults() {

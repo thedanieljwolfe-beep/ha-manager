@@ -3,7 +3,7 @@
 from datetime import timedelta
 
 DOMAIN = "ha_manager"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 PANEL_URL_PATH = "ha-manager"
 PANEL_TITLE = "HA Manager"
@@ -47,3 +47,13 @@ SAFETY_LABEL_ID = "life_safety"
 # Repairs raised by these integrations duplicate our own checks, so they are
 # shown for cross-checking but do not count towards the score.
 CROSS_CHECK_DOMAINS = {"spook", "watchman"}
+
+BACKUP_MAX_AGE_DAYS = 7
+
+# Naming styles for the naming checker.
+STYLE_ROOM_FIRST = "room_first"  # "Kitchen Ceiling Light"
+STYLE_NO_ROOM = "no_room"  # "Ceiling Light", the room is set separately
+NAMING_STYLES = (STYLE_ROOM_FIRST, STYLE_NO_ROOM)
+
+CHANGES_STORAGE_KEY = f"{DOMAIN}_changes"
+CHANGES_KEEP = 500
