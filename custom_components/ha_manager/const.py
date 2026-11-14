@@ -3,7 +3,7 @@
 from datetime import timedelta
 
 DOMAIN = "ha_manager"
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 PANEL_URL_PATH = "ha-manager"
 PANEL_TITLE = "HA Manager"
@@ -65,3 +65,6 @@ PLAN_IMAGE_MAX = 2_000_000  # characters of data URL, roughly 1.5 MB of picture
 
 CHANGES_STORAGE_KEY = f"{DOMAIN}_changes"
 CHANGES_KEEP = 500
+
+# Tidy up: how long something has to be unavailable before it is suggested.
+TIDY_OFFLINE_DAYS = 7

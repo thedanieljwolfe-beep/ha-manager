@@ -54,11 +54,39 @@ what is broken, what is left over, and what to fix first.
   wrong room, and suggests a fix you can apply in one click. Only the friendly
   name changes. Entity IDs are never touched, so nothing that refers to them
   breaks.
-- **Captain's Log.** Every move and rename is recorded with the old and new
+- **Captain's Log.** Every move, rename, disable and removal is recorded with the old and new
   value, and has an Undo button. Undo leaves alone anything that has been
   changed again since.
 
-HA Manager never deletes anything.
+### Tidying up (every change logged, every change undoable)
+
+- **Tidy up tab.** A clear-out list so the real problems stand out:
+  - **Broken**: automations and scripts Home Assistant could not load.
+  - **Duplicates**: automations or scripts with exactly the same settings, or
+    the same name; and entities that look like they were added twice (such as
+    `light.kitchen` and a dead `light.kitchen_2`). It suggests which one to keep.
+  - **Leftovers**: things left behind by integrations you have removed.
+  - **Offline for a week or more**: HA Manager keeps its own note of when
+    something went offline, so a restart does not reset the clock.
+  - **Not used**: automations switched off that have not run in 90 days, and
+    scripts nothing calls that have not run in 90 days.
+- **Disable** switches something off but keeps it (automations are switched
+  off, entities and devices are disabled).
+- **Ignore** stops something being suggested. Ignored items are listed at the
+  bottom and can be brought back.
+- **Remove** rescans first and checks every automation, script, scene, group
+  and dashboard. Anything still in use is left alone and you are told what uses
+  it. Removing several things together is allowed when the only thing using one
+  of them is another one being removed. Voice assistants, Node-RED and other
+  apps outside Home Assistant cannot be checked.
+- What can be removed: automations and scripts made in Home Assistant's editor
+  (exactly what its bin icon does), and leftover entities. A copy of each is
+  kept in the Captain's Log so it can be put back. Live entities cannot be
+  removed (their integration would just recreate them) and devices are never
+  removed (Home Assistant cannot put one back), so for those use Disable.
+- Life-safety devices are never suggested, even when offline.
+- **Undo one thing at a time.** Where one log entry changed several things,
+  each has its own Undo, as well as Undo all.
 
 It also creates `sensor.ha_manager_health_score` so you can put the score on a
 dashboard or use it in an automation.
