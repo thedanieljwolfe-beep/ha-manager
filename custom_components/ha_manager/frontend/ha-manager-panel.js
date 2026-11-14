@@ -2,6 +2,7 @@
 
 const TABS = [
   ["overview", "Overview"],
+  ["tidy", "Tidy up"],
   ["safety", "Life safety"],
   ["activity", "Automations"],
   ["blast", "Blast radius"],
@@ -22,6 +23,16 @@ const NAME_PROBLEMS = {
   no_room: "No room in name",
   has_room: "Room repeated",
 };
+
+const TIDY_GROUPS = {
+  broken: { label: "Broken", hint: "Automations and scripts that cannot run at all" },
+  duplicate: { label: "Duplicates", hint: "The same thing more than once" },
+  leftover: { label: "Leftovers", hint: "Left behind by integrations you have removed" },
+  offline: { label: "Offline for a week or more", hint: "Probably not coming back" },
+  unused: { label: "Not used", hint: "Not run in months, and nothing relies on them" },
+};
+
+const TYPE_LABEL = { entity: "entity", device: "device", automation: "automation", script: "script" };
 
 const SEVERITY = {
   critical: { label: "Critical", hint: "Fix these first" },
@@ -184,6 +195,22 @@ const STYLE = `
   .entry.undone { opacity:.6; }
   .entry .top { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .entry .top strong { flex:1; font-weight:500; }
+  .trow { display:flex; gap:10px; align-items:flex-start; padding:10px 0; border-bottom:1px solid var(--hm-divider); }
+  .trow:last-child { border-bottom:none; }
+  .trow.sel { background:color-mix(in srgb, var(--hm-primary) 8%, transparent); }
+  .trow input { margin-top:4px; }
+  .tmain { flex:1; min-width:0; overflow-wrap:anywhere; }
+  .tbtns { display:flex; gap:6px; flex-wrap:wrap; justify-content:flex-end; }
+  .tbtns .btn { padding:4px 10px; font-size:13px; }
+  .btn.danger { border-color:var(--crit); color:var(--crit); }
+  .btn.dim { border-color:var(--hm-divider); color:var(--secondary-text-color,#727272); }
+  .btn.dangerfill { background:var(--crit); border-color:var(--crit); color:#fff; }
+  .usedby { font-size:13px; color:#b07d00; }
+  .settitle { display:flex; gap:10px; justify-content:space-between; align-items:baseline; flex-wrap:wrap; }
+  .confirm { border:2px solid var(--crit); }
+  .good { color:var(--ok); font-weight:500; }
+  .warnbox { background:color-mix(in srgb, var(--warn) 22%, transparent); border-radius:8px; padding:8px 10px; }
+  @media (max-width:600px) { .trow { flex-wrap:wrap; } .tbtns { width:100%; justify-content:flex-start; padding-left:26px; } }
   @media (max-width:600px) { .namerow { grid-template-columns:1fr; } }
   @media (max-width:600px) { summary { flex-direction:column; gap:2px; } summary .cat { min-width:0; } }
 `;
@@ -211,6 +238,9 @@ class HaManagerPanel extends HTMLElement {
     this._plan = null;
     this._floor = null;
     this._planEdit = false;
+    this._tidy = null;
+    this._tidySel = new Set();
+    this._confirm = null;
     for (const type of ["pointerdown", "pointermove", "pointerup"]) {
       this.shadowRoot.addEventListener(type, (ev) => this._onPointer(ev));
     }
@@ -272,7 +302,7 @@ class HaManagerPanel extends HTMLElement {
     }
     this._busy = false;
     if (refresh) {
-      this._rooms = this._names = this._log = this._report = this._plan = null;
+      this._rooms = this._names = this._log = this._report = this._plan = this._tidy = null;
       this._explained = {};
     }
     this._render();
@@ -296,6 +326,9 @@ class HaManagerPanel extends HTMLElement {
       },
       log: async () => {
         if (!this._log) this._log = await this._ws({ type: "ha_manager/changes" });
+      },
+      tidy: async () => {
+        if (!this._tidy) this._tidy = await this._ws({ type: "ha_manager/tidy" });
       },
     };
     const loader = loaders[this._tab];
@@ -587,6 +620,7 @@ class HaManagerPanel extends HTMLElement {
       this._log = null;
       this._targets = null;
       this._plan = null;
+      this._tidy = null;
       const change = result.change;
       if (change && change.items && change.items.length) {
         this._notice = { text: describe ? describe(change) : change.summary + ".", id: change.id };
@@ -606,8 +640,10 @@ class HaManagerPanel extends HTMLElement {
     }
   }
 
-  async _undo(id) {
-    const result = await this._change({ type: "ha_manager/undo", change_id: id });
+  async _undo(id, item) {
+    const message = { type: "ha_manager/undo", change_id: id };
+    if (item !== undefined) message.item = item;
+    const result = await this._change(message);
     if (!result) return;
     const skipped = result.skipped.length;
     this._notice = {
@@ -616,6 +652,71 @@ class HaManagerPanel extends HTMLElement {
         (skipped ? `, ${skipped} left alone because they had changed again or gone.` : "."),
     };
     this._render();
+  }
+
+  /* ---------- tidy up ---------- */
+
+  _tidyName(key) {
+    const item = this._tidy && this._tidy.items[key];
+    return item ? item.name : key.split(":").slice(1).join(":");
+  }
+
+  async _tidyIgnore(keys, ignored) {
+    try {
+      this._tidy = await this._ws({ type: "ha_manager/tidy/ignore", keys, ignored });
+      for (const k of keys) this._tidySel.delete(k);
+      this._notice = {
+        text: ignored
+          ? `Ignored ${keys.length === 1 ? `“${this._tidyName(keys[0])}”` : `${keys.length} things`}. It is listed at the bottom if you change your mind.`
+          : "Back on the list.",
+      };
+      this._ws({ type: "ha_manager/scan" }).then((data) => (this._data = data));
+    } catch (err) {
+      this._error = (err && err.message) || "That did not work.";
+    }
+    this._render();
+  }
+
+  async _tidyApply(action, keys) {
+    this._error = "";
+    this._confirm = null;
+    this._busyAction = true;
+    this._render();
+    let result = null;
+    try {
+      result = await this._ws({ type: "ha_manager/tidy/apply", action, keys });
+    } catch (err) {
+      this._error = (err && err.message) || "That did not work.";
+    }
+    this._busyAction = false;
+    if (result) {
+      this._tidy = result.tidy;
+      this._tidySel.clear();
+      this._log = this._rooms = this._names = this._plan = this._targets = null;
+      const done = result.change ? result.change.items.length : 0;
+      const verb = action === "remove" ? "Removed" : "Disabled";
+      const skipped = result.skipped.map((s) => `${s.label} (${s.reason})`).join("; ");
+      let text = done ? `${verb} ${done === 1 ? `“${result.change.items[0].label}”` : `${done} things`}.` : `Nothing was ${verb.toLowerCase()}.`;
+      if (skipped) text += ` Skipped: ${skipped}.`;
+      const undoable = result.change && result.change.items.some((i) => i.undoable !== false);
+      this._notice = { text, id: undoable ? result.change.id : null };
+      this._ws({ type: "ha_manager/scan" }).then((data) => (this._data = data));
+    }
+    this._render();
+  }
+
+  async _tidyConfirm(keys) {
+    this._confirm = { keys, check: null };
+    this._render();
+    try {
+      this._confirm.check = await this._ws({ type: "ha_manager/tidy/check", keys });
+    } catch (err) {
+      this._confirm = null;
+      this._error = (err && err.message) || "Could not double-check that.";
+    }
+    this._render();
+    const box = this.shadowRoot.querySelector(".confirm");
+    if (box) box.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   _move(keys, areaId) {
@@ -631,7 +732,11 @@ class HaManagerPanel extends HTMLElement {
   _onChange(ev) {
     const el = ev.target;
     const act = el.dataset && el.dataset.change;
-    if (act === "select") {
+    if (act === "tidy-select") {
+      if (el.checked) this._tidySel.add(el.dataset.key);
+      else this._tidySel.delete(el.dataset.key);
+      this._render();
+    } else if (act === "select") {
       if (el.checked) this._sel.add(el.dataset.key);
       else this._sel.delete(el.dataset.key);
       this._render();
@@ -752,8 +857,46 @@ class HaManagerPanel extends HTMLElement {
           this._render();
         });
       }
+    } else if (act === "tidy-disable") {
+      const keys = el.dataset.key ? [el.dataset.key] : [...this._tidySel];
+      const used = keys.filter((k) => this._tidy.items[k] && this._tidy.items[k].used_by);
+      const warn = used.length
+        ? `\n\n${used.length === 1 ? "It is" : `${used.length} of them are`} still used by something, which will stop working properly while ${used.length === 1 ? "it is" : "they are"} disabled.`
+        : "";
+      if (window.confirm(`Disable ${keys.length === 1 ? `“${this._tidyName(keys[0])}”` : `${keys.length} things`}? You can undo this from the Log tab.${warn}`)) {
+        this._tidyApply("disable", keys);
+      }
+    } else if (act === "tidy-remove") {
+      const keys = el.dataset.key ? [el.dataset.key] : [...this._tidySel];
+      const item = el.dataset.key && this._tidy.items[el.dataset.key];
+      if (item && !item.can_remove) {
+        this._notice = { text: `“${item.name}” can’t be removed from here. ${item.remove_note}` };
+        this._render();
+      } else {
+        this._tidyConfirm(keys);
+      }
+    } else if (act === "tidy-remove-go") {
+      const ok = this._confirm.check.items.filter((i) => i.found && i.can_remove && !i.used_by.length).map((i) => i.key);
+      if (ok.length) this._tidyApply("remove", ok);
+    } else if (act === "tidy-cancel") {
+      this._confirm = null;
+      this._render();
+    } else if (act === "tidy-ignore") {
+      const keys = el.dataset.key ? [el.dataset.key] : [...this._tidySel];
+      this._tidyIgnore(keys, el.dataset.value !== "0");
+    } else if (act === "tidy-clear") {
+      this._tidySel.clear();
+      this._render();
+    } else if (act === "tidy-open") {
+      ev.preventDefault();
+      this._tab = "tidy";
+      this._notice = null;
+      this._render();
+      this._loadTab();
     } else if (act === "undo") {
       this._undo(el.dataset.id);
+    } else if (act === "undo-item") {
+      this._undo(el.dataset.id, Number(el.dataset.item));
     } else if (act === "dismiss") {
       this._notice = null;
       this._render();
@@ -852,6 +995,7 @@ class HaManagerPanel extends HTMLElement {
     else if (this._tab === "plan") body += this._planTab();
     else if (this._tab === "names") body += this._namesTab();
     else if (this._tab === "log") body += this._logTab();
+    else if (this._tab === "tidy") body += this._tidyTab();
     else body += this._blastTab();
 
     this.shadowRoot.innerHTML = `<style>${STYLE}</style>
@@ -920,6 +1064,11 @@ class HaManagerPanel extends HTMLElement {
           <span class="chip tidy">${s.counts.tidy} tidy-up</span>
         </div>
       </div></div>`;
+    if (d.tidy && d.tidy.total) {
+      html += `<div class="card bar" style="position:static"><span style="flex:1"><strong>${d.tidy.total} thing${d.tidy.total === 1 ? "" : "s"}
+        you could clear out.</strong> <span class="muted">Duplicates, broken bits, leftovers and things nobody uses.</span></span>
+        <button class="btn solid" data-act="tidy-open">Tidy up</button></div>`;
+    }
     if (!d.findings.length) {
       html += `<div class="card">Nothing to report. Everything checked out.</div>`;
     }
@@ -1154,16 +1303,148 @@ class HaManagerPanel extends HTMLElement {
     return html + `<div class="card">${rows.join("")}</div>`;
   }
 
+  _tidyRow(item, inSet) {
+    const sel = this._tidySel.has(item.key);
+    const nameText = esc(item.name);
+    let name = nameText;
+    if (item.type === "entity") name = `<a href="#" data-act="more-info" data-id="${esc(item.id)}">${nameText}</a>`;
+    else if (item.link) name = `<a data-act="nav" href="${esc(item.link)}">${nameText}</a>`;
+    const meta = [TYPE_LABEL[item.type], item.area].filter(Boolean).join(" · ");
+    const suggest =
+      inSet && item.suggest === "keep"
+        ? `<span class="chip ok">Keep this one</span>`
+        : inSet && item.suggest === "remove"
+          ? `<span class="chip tidy">Suggest removing</span>`
+          : "";
+    const reasons = inSet ? item.dup_note || "" : item.reasons.join(". ");
+    const used = item.used_by
+      ? `<div class="usedby">Used by ${item.used_by}: ${esc(item.used_by_names.join(", "))}${item.used_by > item.used_by_names.length ? "…" : ""}</div>`
+      : "";
+    return `<div class="trow ${sel ? "sel" : ""}">
+      <input type="checkbox" data-change="tidy-select" data-key="${esc(item.key)}" ${sel ? "checked" : ""} aria-label="Select ${nameText}">
+      <div class="tmain"><div>${name} ${suggest}</div>
+        <div class="muted">${esc(meta)}${item.type === "entity" || item.type === "automation" || item.type === "script" ? ` · <code>${esc(item.id)}</code>` : ""}</div>
+        ${reasons ? `<div class="muted">${esc(reasons)}</div>` : ""}${used}</div>
+      <div class="tbtns">
+        ${item.can_disable ? `<button class="btn" data-act="tidy-disable" data-key="${esc(item.key)}">Disable</button>` : ""}
+        ${inSet ? "" : `<button class="btn" data-act="tidy-ignore" data-key="${esc(item.key)}">Ignore</button>`}
+        <button class="btn ${item.can_remove ? "danger" : "dim"}" data-act="tidy-remove" data-key="${esc(item.key)}"
+          title="${esc(item.remove_note)}">Remove…</button>
+      </div></div>`;
+  }
+
+  _confirmBox() {
+    const c = this._confirm;
+    if (!c) return "";
+    if (!c.check) return `<div class="card confirm"><strong>Double-checking…</strong>
+      <div class="muted">Rescanning every automation, script, scene, group and dashboard to make sure nothing uses ${c.keys.length === 1 ? "it" : "them"}.</div></div>`;
+    const items = c.check.items;
+    const ok = items.filter((i) => i.found && i.can_remove && !i.used_by.length);
+    const rows = items
+      .map((i) => {
+        let verdict;
+        if (!i.found) verdict = `<span class="muted">already gone</span>`;
+        else if (!i.can_remove) verdict = `<span class="error">can’t be removed here</span> <span class="muted">${esc(i.remove_note)}</span>`;
+        else if (i.used_by.length)
+          verdict = `<span class="error">still used, so it will be left alone:</span> ${i.used_by
+            .map((u) => (u.edit_url ? `<a data-act="nav" href="${esc(u.edit_url)}">${esc(u.name)}</a>` : esc(u.name)))
+            .join(", ")}`;
+        else verdict = `<span class="good">✓ nothing uses it</span> <span class="muted">· ${i.undoable_remove ? "can be put back from the Log" : "cannot be undone"}</span>`;
+        return `<li><strong>${esc(i.name)}</strong> · ${verdict}</li>`;
+      })
+      .join("");
+    const permanent = ok.filter((i) => !i.undoable_remove).length;
+    let backup = "";
+    if (permanent) {
+      const last = c.check.last_backup;
+      const days = last ? Math.floor((Date.now() - new Date(last).getTime()) / 86400000) : null;
+      backup =
+        days === null
+          ? `<p class="warnbox">${permanent} of these cannot be undone, and HA Manager cannot see a recent backup. Consider making one first under Settings, System, Backups.</p>`
+          : days > 7
+            ? `<p class="warnbox">${permanent} of these cannot be undone, and your last backup was ${days} days ago. Consider making one first.</p>`
+            : `<p class="muted">${permanent} of these cannot be undone. Your last backup was ${days === 0 ? "today" : `${days} day${days === 1 ? "" : "s"} ago`}.</p>`;
+    }
+    return `<div class="card confirm"><strong>Remove ${items.length === 1 ? "this" : `these ${items.length}`}?</strong>
+      <div class="muted">Checked just now against every automation, script, scene, group and dashboard.
+      Voice assistants, Node-RED and other apps outside Home Assistant can’t be checked.</div>
+      <ul class="items">${rows}</ul>${backup}
+      <div class="actions">
+        ${ok.length ? `<button class="btn solid dangerfill" data-act="tidy-remove-go">Remove ${ok.length === items.length ? (ok.length === 1 ? "it" : `all ${ok.length}`) : `the ${ok.length} that are safe`}</button>` : `<strong>Nothing here is safe to remove.</strong>`}
+        <button class="btn" data-act="tidy-cancel">Cancel</button></div></div>`;
+  }
+
+  _tidyTab() {
+    const t = this._tidy;
+    if (!t) return `<div class="card">Looking for clutter…</div>`;
+    let html = `<div class="card"><strong>Tidy up.</strong>
+      <div class="muted">Things you could clear out so the real problems stand out. Nothing changes until you press a button.
+      <b>Disable</b> switches something off but keeps it, and can be undone from the Log.
+      <b>Ignore</b> just stops it being suggested here. <b>Remove</b> rescans and double-checks that nothing uses it first,
+      and keeps a copy in the Log. If something turns out to need it, open the Log and undo that one item.</div></div>`;
+    if (this._busyAction) html += `<div class="card">Working on it…</div>`;
+    html += this._confirmBox();
+    if (this._tidySel.size) {
+      const sel = [...this._tidySel].map((k) => t.items[k]).filter(Boolean);
+      const canDisable = sel.filter((i) => i.can_disable).length;
+      html += `<div class="card bar"><strong>${this._tidySel.size} selected</strong><span style="flex:1"></span>
+        ${canDisable ? `<button class="btn" data-act="tidy-disable">Disable${canDisable < sel.length ? ` ${canDisable}` : ""}</button>` : ""}
+        <button class="btn" data-act="tidy-ignore">Ignore</button>
+        <button class="btn danger" data-act="tidy-remove">Remove…</button>
+        <button class="btn" data-act="tidy-clear">Clear</button></div>`;
+    }
+    if (!t.total) html += `<div class="card">Nothing to tidy. Shipshape.</div>`;
+    for (const [group, meta] of Object.entries(TIDY_GROUPS)) {
+      if (group === "duplicate") {
+        if (!t.duplicates.length) continue;
+        html += `<h2>${meta.label} <small>${meta.hint}</small></h2>`;
+        for (const set of t.duplicates) {
+          html += `<div class="card"><div class="settitle"><strong>${esc(set.title)}</strong>
+            <button class="linkbtn" data-act="tidy-ignore" data-key="${esc(set.key)}">Not duplicates, stop suggesting</button></div>
+            <div class="muted">${esc(set.advice)}</div>
+            ${set.keys.map((k) => t.items[k]).filter(Boolean).map((i) => this._tidyRow(i, true)).join("")}</div>`;
+        }
+        continue;
+      }
+      const list = t.groups[group];
+      if (!list.length) continue;
+      let hint = meta.hint;
+      if (group === "unused") hint = `Not run in ${t.unused_days} days, and nothing relies on them`;
+      html += `<h2>${meta.label} <small>${list.length} · ${hint}</small></h2>
+        <div class="card">${list.map((i) => this._tidyRow(i, false)).join("")}</div>`;
+    }
+    const ignored = t.ignored.length + t.ignored_sets.length;
+    if (ignored) {
+      html += `<details class="card"><summary class="muted">${ignored} ignored</summary><ul class="items">
+        ${t.ignored.map((i) => `<li>${esc(i.name)} <span class="muted">· ${esc(i.reasons.join(". "))}</span>
+          <button class="linkbtn" data-act="tidy-ignore" data-value="0" data-key="${esc(i.key)}">Stop ignoring</button></li>`).join("")}
+        ${t.ignored_sets.map((s) => `<li>${esc(s.title)} <button class="linkbtn" data-act="tidy-ignore" data-value="0" data-key="${esc(s.key)}">Stop ignoring</button></li>`).join("")}
+      </ul></details>`;
+    }
+    html += `<p class="muted">Life-safety devices (smoke, CO, gas and leak sensors) are never suggested here, even when offline.
+      They stay on the Overview and Life safety tabs until they are fixed.</p>`;
+    return html;
+  }
+
   _logTab() {
     const log = this._log;
     if (!log) return `<div class="card">Loading the log…</div>`;
     let html = `<div class="card"><strong>Captain’s Log.</strong>
       <div class="muted">Every change HA Manager has made, newest first. Undo puts things back as they were,
-      and leaves alone anything that has been changed again since.</div></div>`;
+      and leaves alone anything that has been changed again since. Where one entry changed several things,
+      you can undo just one of them.</div></div>`;
     if (!log.length) return html + `<div class="card">No changes yet. Nothing has been touched.</div>`;
     const entries = log.map((e) => {
+      const many = e.items.length > 1 && !e.undone;
       const items = e.items
-        .map((i) => `<li>${esc(i.label)} <span class="muted">· ${esc(i.before_text)} → ${esc(i.after_text)}</span></li>`)
+        .map((i, index) => {
+          let tail = "";
+          if (i.undone) tail = ` <span class="chip off">Undone ${ago(i.undone)}</span>`;
+          else if (many && i.undoable !== false)
+            tail = ` <button class="linkbtn" data-act="undo-item" data-id="${esc(e.id)}" data-item="${index}">Undo just this</button>`;
+          if (i.undo_failed) tail += ` <span class="error">· could not undo: ${esc(i.undo_failed)}</span>`;
+          return `<li>${esc(i.label)} <span class="muted">· ${esc(i.before_text)} → ${esc(i.after_text)}</span>${tail}</li>`;
+        })
         .join("");
       const skipped = (e.undo_skipped || [])
         .map((s) => `<li>${esc(s.label)} <span class="muted">· not put back: ${esc(s.reason)}</span></li>`)
@@ -1174,9 +1455,11 @@ class HaManagerPanel extends HTMLElement {
           ${
             e.undone
               ? `<span class="chip off">Undone ${ago(e.undone)}</span>`
-              : `<button class="btn" data-act="undo" data-id="${esc(e.id)}">Undo</button>`
+              : e.items.some((i) => i.undoable !== false)
+                ? `<button class="btn" data-act="undo" data-id="${esc(e.id)}">${e.items.length > 1 ? "Undo all" : "Undo"}</button>`
+                : `<span class="muted">Cannot be undone</span>`
           }</div>
-        <details><summary class="muted">${e.items.length} ${e.items.length === 1 ? "change" : "changes"}</summary>
+        <details ${many ? "open" : ""}><summary class="muted">${e.items.length} ${e.items.length === 1 ? "change" : "changes"}${many ? " · undo them all, or one at a time" : ""}</summary>
           <ul class="items">${items}${skipped}</ul></details></div>`;
     });
     return html + `<div class="card">${entries.join("")}</div>`;

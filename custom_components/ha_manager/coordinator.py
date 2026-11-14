@@ -19,10 +19,17 @@ from homeassistant.util import dt as dt_util
 from .analysis import analyse
 from .changes import (
     AREA_FLOOR,
+    AUTOMATION_ON,
     DEVICE_AREA,
+    DEVICE_DISABLED,
     DEVICE_NAME,
     ENTITY_AREA,
+    ENTITY_DISABLED,
     ENTITY_NAME,
+    REMOVED_AUTOMATION,
+    REMOVED_ENTITY,
+    REMOVED_SCRIPT,
+    USER,
     ChangeError,
     ChangeLog,
 )
@@ -43,6 +50,7 @@ from .const import (
 from .explain import explain
 from .models import Snapshot
 from .report import build_report
+from .tidy import describe, tidy, track_unavailable, usage
 
 _LOGGER = logging.getLogger(__name__)
 SAVE_DELAY = 300  # seconds
@@ -86,10 +94,15 @@ class HAManagerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
             # {entity_id: {"hash": ..., "text": ...}} AI explanations already fetched
             "explanations": {},
+            # Tidy up: keys the user has said to stop suggesting
+            "tidy_ignored": [],
+            # {entity_id: ISO time} when each entity was first seen unavailable
+            "unavailable_since": {},
         }
         self._plan_store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, PLAN_STORAGE_KEY)
         self.layouts: dict[str, dict[str, Any]] = {}
         self._backfilled: set[str] = set()
+        self.tidy_result: dict[str, Any] | None = None
 
     async def async_load(self) -> None:
         """Load what the user has saved (test log, ignored findings)."""
@@ -138,8 +151,20 @@ class HAManagerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if consumer.kind == "automation":
                 consumer.triggers_24h = totals.get(consumer.id, 0)
         await self._async_sample_batteries(snapshot)
+        track_unavailable(self.saved["unavailable_since"], snapshot)
         self.snapshot = snapshot
-        return analyse(snapshot, self.saved)
+        self._store.async_delay_save(lambda: self.saved, SAVE_DELAY)
+        return self._with_tidy(analyse(snapshot, self.saved))
+
+    def _with_tidy(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Work out the tidy-up list and add its counts to the scan result."""
+        if self.snapshot is not None:
+            self.tidy_result = tidy(self.snapshot, set(self.saved["tidy_ignored"]))
+            result["tidy"] = {
+                "total": self.tidy_result["total"],
+                "counts": self.tidy_result["counts"],
+            }
+        return result
 
     async def async_save(self) -> None:
         """Write everything to disk now."""
@@ -149,7 +174,7 @@ class HAManagerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._store.async_save(self.saved)
         if self.snapshot is not None:
             # Re-run the checks on the data we already have: instant, no rescan.
-            self.async_set_updated_data(analyse(self.snapshot, self.saved))
+            self.async_set_updated_data(self._with_tidy(analyse(self.snapshot, self.saved)))
 
     async def async_log_safety_test(self, unit_id: str) -> None:
         """Record that a life-safety device was tested just now."""
@@ -233,11 +258,120 @@ class HAManagerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._async_changed()
         return entry
 
-    async def async_undo(self, change_id: str) -> dict[str, Any]:
-        """Undo one entry in the log."""
-        result = await self.changes.async_undo(change_id)
+    async def async_undo(self, change_id: str, index: int | None = None) -> dict[str, Any]:
+        """Undo one entry in the log, or one item in it."""
+        result = await self.changes.async_undo(change_id, index)
         await self._async_changed()
         return result
+
+    # ----- tidy up ---------------------------------------------------------
+
+    async def async_tidy_ignore(self, keys: list[str], ignored: bool) -> None:
+        """Stop suggesting things, or start again."""
+        current = set(self.saved["tidy_ignored"])
+        if ignored:
+            current.update(keys)
+        else:
+            current.difference_update(keys)
+        self.saved["tidy_ignored"] = sorted(current)
+        await self._async_saved_changed()
+
+    def _check_one(self, key: str, batch: set[str]) -> dict[str, Any]:
+        """The double-check for one thing, against the latest scan."""
+        assert self.snapshot is not None
+        item = describe(self.snapshot, key)
+        if item is None:
+            return {"key": key, "name": key.partition(":")[2], "found": False,
+                    "can_remove": False, "remove_note": "It has already gone", "used_by": []}
+        found = usage(self.snapshot, key) or {"used_by": []}
+        # Things being removed in the same go do not count as users.
+        used_by = [u for u in found["used_by"] if f"{u['kind']}:{u['id']}" not in batch]
+        return {**item, "found": True, "used_by": used_by}
+
+    async def async_tidy_check(self, keys: list[str]) -> dict[str, Any]:
+        """Rescan, then say what removing these would do."""
+        await self.async_refresh()
+        if self.snapshot is None:
+            raise ChangeError("The scan failed, see the log")
+        batch = set(keys)
+        checks = [self._check_one(key, batch) for key in keys]
+        last = self.snapshot.last_backup
+        return {
+            "items": checks,
+            "backup_known": self.snapshot.backup_known,
+            "last_backup": last.isoformat() if last else None,
+        }
+
+    async def async_tidy_apply(
+        self, action: str, keys: list[str], user_id: str | None
+    ) -> dict[str, Any]:
+        """Disable, enable or remove things from the tidy-up list."""
+        await self.async_refresh()
+        if self.snapshot is None:
+            raise ChangeError("The scan failed, see the log")
+        consumers = {c.id: c for c in self.snapshot.consumers}
+        skipped: list[dict[str, str]] = []
+        batch = set(keys)
+        if action in ("disable", "enable"):
+            requested = []
+            for key in keys:
+                kind, _, ref = key.partition(":")
+                item = describe(self.snapshot, key)
+                if item is None:
+                    skipped.append({"label": ref, "reason": "It has already gone"})
+                    continue
+                if action == "disable" and not item["can_disable"]:
+                    skipped.append({"label": item["name"], "reason": item["disable_note"]})
+                    continue
+                if kind == "device":
+                    requested.append((DEVICE_DISABLED, ref, USER if action == "disable" else None))
+                elif kind == "automation":
+                    requested.append((AUTOMATION_ON, ref, "off" if action == "disable" else "on"))
+                else:
+                    requested.append((ENTITY_DISABLED, ref, USER if action == "disable" else None))
+            count = len(requested)
+            verb = "Disabled" if action == "disable" else "Re-enabled"
+            summary = (
+                f"{verb} '{self.changes._label(requested[0][0], requested[0][1])}'"  # noqa: SLF001
+                if count == 1
+                else f"{verb} {count} things"
+            )
+            entry = await self.changes.async_apply(summary, requested, user_id) if requested else None
+        else:
+            requested = []
+            for key in keys:
+                check = self._check_one(key, batch)
+                if not check["found"] or not check["can_remove"]:
+                    skipped.append({"label": check["name"], "reason": check["remove_note"]})
+                    continue
+                if check["used_by"]:
+                    names = ", ".join(u["name"] for u in check["used_by"][:3])
+                    more = len(check["used_by"]) - 3
+                    skipped.append({
+                        "label": check["name"],
+                        "reason": f"Still used by {names}" + (f" and {more} more" if more > 0 else ""),
+                    })
+                    continue
+                kind, _, ref = key.partition(":")
+                if kind == "automation":
+                    requested.append((REMOVED_AUTOMATION, ref, consumers[ref].config_key))
+                elif kind == "script":
+                    requested.append((REMOVED_SCRIPT, ref, consumers[ref].config_key))
+                else:
+                    requested.append((REMOVED_ENTITY, ref, None))
+            entry = None
+            if requested:
+                count = len(requested)
+                summary = (
+                    f"Removed '{self.changes._label(requested[0][0], requested[0][1])}'"  # noqa: SLF001
+                    if count == 1
+                    else f"Removed {count} things"
+                )
+                entry, failed = await self.changes.async_remove(summary, requested, user_id)
+                skipped.extend(failed)
+        if entry and entry["items"]:
+            await self._async_changed()
+        return {"change": entry, "skipped": skipped, "tidy": self.tidy_result}
 
     # ----- battery history -------------------------------------------------
 

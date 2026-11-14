@@ -32,6 +32,7 @@ class EntityInfo:
     orphaned: bool = False  # left behind by an integration that has gone
     registry_name: str | None = None  # the name the user has typed in, if any
     last_seen: datetime | None = None
+    last_changed: datetime | None = None  # when the state last changed
     members: list[str] | None = None  # for groups
 
     @property
@@ -73,6 +74,10 @@ class Consumer:
     triggers_24h: int | None = None
     edit_url: str | None = None
     config: dict[str, Any] | None = None  # the raw settings, for the explainer
+    # True when it lives in automations.yaml or scripts.yaml, the files Home
+    # Assistant's own editor uses, so HA Manager can remove (and restore) it.
+    managed: bool = False
+    config_key: str | None = None  # its id in that file
 
     @property
     def all_entities(self) -> set[str]:
@@ -108,6 +113,8 @@ class Snapshot:
     repairs: list[RepairIssue] = field(default_factory=list)
     watchman: dict[str, int] | None = None  # label -> count
     counting_since: datetime | None = None  # when trigger counting began
+    # entity_id -> when HA Manager first saw it unavailable (survives restarts)
+    unavailable_since: dict[str, datetime] = field(default_factory=dict)
 
 
 @dataclass

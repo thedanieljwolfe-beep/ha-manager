@@ -24,6 +24,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .models import Consumer, DeviceInfo, EntityInfo, RepairIssue, Snapshot
+from .editor_files import async_editor_keys
 from .references import extract_references
 
 _LOGGER = logging.getLogger(__name__)
@@ -110,6 +111,7 @@ def _collect_entities(hass: HomeAssistant, snapshot: Snapshot) -> None:
             orphaned=orphaned,
             registry_name=entry.name,
             last_seen=last_seen(state),
+            last_changed=state.last_changed if state else None,
             members=list(members) if isinstance(members, (list, tuple)) else None,
         )
         if entry.platform == "backup" and entry.unique_id == "last_successful_automatic_backup":
@@ -128,6 +130,7 @@ def _collect_entities(hass: HomeAssistant, snapshot: Snapshot) -> None:
             in_registry=False,
             orphaned=bool(state.attributes.get(ATTR_RESTORED)),
             last_seen=last_seen(state),
+            last_changed=state.last_changed,
             members=list(members) if isinstance(members, (list, tuple)) else None,
         )
 
@@ -194,9 +197,12 @@ def _collect_automations_and_scripts(hass: HomeAssistant, snapshot: Snapshot) ->
             if kind == "automation":
                 config_id = state.attributes.get("id") or (entry.unique_id if entry else None)
                 if config_id:
+                    consumer.config_key = str(config_id)
                     consumer.edit_url = f"/config/automation/edit/{config_id}"
-            elif entry or entity_id in raw_configs:
-                consumer.edit_url = f"/config/script/edit/{entity_id.split('.', 1)[1]}"
+            else:
+                consumer.config_key = entity_id.split(".", 1)[1]
+                if entry or entity_id in raw_configs:
+                    consumer.edit_url = f"/config/script/edit/{consumer.config_key}"
             snapshot.consumers.append(consumer)
 
 
@@ -317,6 +323,14 @@ def _collect_watchman(hass: HomeAssistant, snapshot: Snapshot) -> None:
         snapshot.watchman = counts
 
 
+async def _collect_managed(hass: HomeAssistant, snapshot: Snapshot) -> None:
+    """Mark the automations and scripts that live in the editor's own files."""
+    keys = await async_editor_keys(hass)
+    for consumer in snapshot.consumers:
+        if consumer.kind in keys and consumer.config_key in keys[consumer.kind]:
+            consumer.managed = True
+
+
 async def async_collect(hass: HomeAssistant) -> Snapshot:
     """Build a snapshot of the whole setup."""
     snapshot = Snapshot(now=dt_util.utcnow())
@@ -339,6 +353,7 @@ async def async_collect(hass: HomeAssistant) -> Snapshot:
     async_steps = (
         ("dashboards", _collect_dashboards),
         ("repairs", _collect_repairs),
+        ("automations.yaml and scripts.yaml", _collect_managed),
     )
     for label, async_step in async_steps:
         try:

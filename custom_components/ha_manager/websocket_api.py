@@ -36,6 +36,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
         ws_changes, ws_undo,
         ws_explain, ws_report, ws_report_settings, ws_report_send,
         ws_plan, ws_plan_save,
+        ws_tidy, ws_tidy_ignore, ws_tidy_check, ws_tidy_apply,
     ):
         websocket_api.async_register_command(hass, command)
 
@@ -284,7 +285,11 @@ async def ws_changes(hass: HomeAssistant, connection, msg: dict[str, Any]) -> No
 
 
 @websocket_api.websocket_command(
-    {vol.Required("type"): "ha_manager/undo", vol.Required("change_id"): str}
+    {
+        vol.Required("type"): "ha_manager/undo",
+        vol.Required("change_id"): str,
+        vol.Optional("item"): vol.All(int, vol.Range(min=0)),
+    }
 )
 @websocket_api.require_admin
 @websocket_api.async_response
@@ -294,7 +299,7 @@ async def ws_undo(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
     if coordinator is None:
         return
     try:
-        result = await coordinator.async_undo(msg["change_id"])
+        result = await coordinator.async_undo(msg["change_id"], msg.get("item"))
     except ChangeError as err:
         connection.send_error(msg["id"], "change_failed", str(err))
         return
@@ -420,3 +425,81 @@ async def ws_plan_save(hass: HomeAssistant, connection, msg: dict[str, Any]) -> 
         connection.send_error(msg["id"], "invalid", str(err))
         return
     connection.send_result(msg["id"], coordinator.layouts)
+
+
+# ----- Tidy up: duplicates, broken, leftovers, offline and unused ---------
+
+_KEY = vol.All(str, vol.Match(r"^(entity|device|automation|script|dup):.+"))
+_KEYS = vol.All([_KEY], vol.Length(min=1, max=500))
+
+
+@websocket_api.websocket_command({vol.Required("type"): "ha_manager/tidy"})
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_tidy(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """The tidy-up list."""
+    coordinator, _ = await _snapshot(hass, connection, msg)
+    if coordinator is None:
+        return
+    if coordinator.tidy_result is None:
+        await coordinator.async_refresh()
+    connection.send_result(msg["id"], coordinator.tidy_result)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_manager/tidy/ignore",
+        vol.Required("keys"): _KEYS,
+        vol.Required("ignored"): bool,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_tidy_ignore(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """Stop suggesting things, or start again."""
+    coordinator, _ = await _snapshot(hass, connection, msg)
+    if coordinator is None:
+        return
+    await coordinator.async_tidy_ignore(msg["keys"], msg["ignored"])
+    connection.send_result(msg["id"], coordinator.tidy_result)
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "ha_manager/tidy/check", vol.Required("keys"): _KEYS}
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_tidy_check(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """Rescan and double-check what removing these would do. Changes nothing."""
+    coordinator, _ = await _snapshot(hass, connection, msg)
+    if coordinator is None:
+        return
+    try:
+        result = await coordinator.async_tidy_check(msg["keys"])
+    except ChangeError as err:
+        connection.send_error(msg["id"], "check_failed", str(err))
+        return
+    connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ha_manager/tidy/apply",
+        vol.Required("action"): vol.In(["disable", "enable", "remove"]),
+        vol.Required("keys"): _KEYS,
+    }
+)
+@websocket_api.require_admin
+@websocket_api.async_response
+async def ws_tidy_apply(hass: HomeAssistant, connection, msg: dict[str, Any]) -> None:
+    """Disable or remove things. Rechecks first; anything still in use is skipped."""
+    coordinator, _ = await _snapshot(hass, connection, msg)
+    if coordinator is None:
+        return
+    keys = [k for k in msg["keys"] if not k.startswith("dup:")]
+    try:
+        result = await coordinator.async_tidy_apply(msg["action"], keys, connection.user.id)
+    except ChangeError as err:
+        connection.send_error(msg["id"], "change_failed", str(err))
+        return
+    connection.send_result(msg["id"], result)
